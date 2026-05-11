@@ -23,6 +23,8 @@ private:
     void ShowContextMenu();
     void LoadSettings();
     void SaveSettings();
+    bool IsStartupEnabled() const;
+    void SetStartupEnabled(bool enabled);
 
     HWND                               m_hwnd      = nullptr;
     HINSTANCE                          m_hInstance = nullptr;
@@ -36,6 +38,7 @@ private:
     static constexpr UINT IDM_TRACKPAD      = 1003;
     static constexpr UINT IDM_BACKBUTTONS   = 1004;
     static constexpr UINT IDM_LEFT_TRACKPAD = 1005;
+    static constexpr UINT IDM_STARTUP       = 1006;
     static constexpr UINT WM_TRAY          = WM_APP + 1;
     static constexpr UINT TRAY_UID         = 1;
 };

@@ -106,6 +106,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             m_controller->SetUseLeftTrackpad(!m_controller->IsUseLeftTrackpad());
             SaveSettings();
             break;
+        case IDM_STARTUP:
+            SetStartupEnabled(!IsStartupEnabled());
+            break;
         case IDM_EXIT:
             m_controller->DisableGameMode();
             PostQuitMessage(0);
@@ -177,7 +180,36 @@ void TrayApp::ShowViGEmBalloon() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-static constexpr wchar_t REG_KEY[] = L"Software\\SteamlessController";
+static constexpr wchar_t REG_KEY[]     = L"Software\\SteamlessController";
+static constexpr wchar_t REG_RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static constexpr wchar_t APP_NAME[]    = L"SteamlessController";
+
+bool TrayApp::IsStartupEnabled() const {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_RUN_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+    bool exists = RegQueryValueExW(key, APP_NAME, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return exists;
+}
+
+void TrayApp::SetStartupEnabled(bool enabled) {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_RUN_KEY, 0, KEY_WRITE, &key) != ERROR_SUCCESS)
+        return;
+
+    if (enabled) {
+        wchar_t path[MAX_PATH];
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        RegSetValueExW(key, APP_NAME, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(path),
+                       static_cast<DWORD>((wcslen(path) + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, APP_NAME);
+    }
+
+    RegCloseKey(key);
+}
 
 void TrayApp::LoadSettings() {
     HKEY key;
@@ -225,6 +257,7 @@ void TrayApp::ShowContextMenu() {
     bool trackpadOn     = m_controller->IsTrackpadMouseEnabled();
     bool backButtonsOn  = m_controller->IsBackButtonsEnabled();
     bool leftTrackpad   = m_controller->IsUseLeftTrackpad();
+    bool startupOn      = IsStartupEnabled();
 
     HMENU menu = CreatePopupMenu();
 
@@ -242,6 +275,11 @@ void TrayApp::ShowContextMenu() {
 
     UINT leftFlags = MF_STRING | (leftTrackpad ? MF_CHECKED : MF_UNCHECKED);
     AppendMenuW(menu, leftFlags, IDM_LEFT_TRACKPAD, L"Use Left Trackpad Instead");
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    UINT startupFlags = MF_STRING | (startupOn ? MF_CHECKED : MF_UNCHECKED);
+    AppendMenuW(menu, startupFlags, IDM_STARTUP, L"Start with Windows");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
