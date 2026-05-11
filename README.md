@@ -42,9 +42,11 @@ The executable will be at `build\Debug\SteamlessController.exe`.
 For a release build:
 
 ```bat
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --target SteamlessController
+cmake -B build/release -G "Visual Studio 18 2025"
+cmake --build build/release --config Release --target SteamlessController
 ```
+
+> If you have Visual Studio 2022, replace `"Visual Studio 18 2025"` with `"Visual Studio 17 2022"`.
 
 ## CMake Targets
 
