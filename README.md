@@ -2,6 +2,8 @@
 
 A lightweight Windows system tray app that lets you use a **Steam Controller** as a standard gamepad — without Steam running.
 
+<img width="261" height="194" alt="image" src="https://github.com/user-attachments/assets/8e4a1355-d854-4b67-a486-590d225700f5" />
+
 When **Steamless Mode** is active, the app disables the controller's built-in keyboard/mouse emulation (lizard mode) and exposes it as a virtual Xbox 360 controller via [ViGEmBus](https://github.com/nefarius/ViGEmBus), making it compatible with any game that supports XInput or the Xbox controller.
 
 ## Features
