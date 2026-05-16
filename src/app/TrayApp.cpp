@@ -1,8 +1,10 @@
 #include "TrayApp.h"
 #include "ControllerManager.h"
 #include "resource.h"
-#include <shellapi.h>
 #include <dbt.h>
+#include <shellapi.h>
+#include <string>
+#include <tlhelp32.h>
 #include <winreg.h>
 
 static TrayApp* g_app = nullptr;
@@ -50,8 +52,12 @@ bool TrayApp::Init(HINSTANCE hInstance) {
             UpdateTrayIcon(connected, gameModeActive, vigemMissing);
         });
 
+    m_steamRunning = IsSteamRunning();
     LoadSettings();
     AddTrayIcon();
+    UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(), false);
+    SetTimer(m_hwnd, TIMER_STEAM_POLL, STEAM_POLL_MS, nullptr);
+    ReconcileAutoMode();
     return true;
 }
 
@@ -91,7 +97,7 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_TOGGLE:
             if (m_controller->IsGameModeActive())
                 m_controller->DisableGameMode();
-            else
+            else if (!m_steamRunning)
                 m_controller->EnableGameMode();
             break;
         case IDM_TRACKPAD:
@@ -109,6 +115,11 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_STARTUP:
             SetStartupEnabled(!IsStartupEnabled());
             break;
+        case IDM_AUTOENABLE:
+            m_autoEnableSteamlessMode = !m_autoEnableSteamlessMode;
+            SaveSettings();
+            ReconcileAutoMode();
+            break;
         case IDM_EXIT:
             m_controller->DisableGameMode();
             PostQuitMessage(0);
@@ -117,11 +128,25 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_DEVICECHANGE:
-        if (wp == DBT_DEVICEARRIVAL || wp == DBT_DEVICEREMOVECOMPLETE)
+        if (wp == DBT_DEVICEARRIVAL || wp == DBT_DEVICEREMOVECOMPLETE) {
             m_controller->OnDeviceChange();
+            ReconcileAutoMode();
+        }
         return TRUE;
 
+    case WM_TIMER:
+        if (wp == TIMER_STEAM_POLL) {
+            bool steamRunning = IsSteamRunning();
+            if (steamRunning != m_steamRunning) {
+                m_steamRunning = steamRunning;
+                ReconcileAutoMode();
+            }
+            return 0;
+        }
+        break;
+
     case WM_DESTROY:
+        KillTimer(hwnd, TIMER_STEAM_POLL);
         PostQuitMessage(0);
         return 0;
     }
@@ -180,6 +205,43 @@ void TrayApp::ShowViGEmBalloon() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
+bool TrayApp::IsSteamRunning() const {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool running = false;
+
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, L"steam.exe") == 0) {
+                running = true;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return running;
+}
+
+void TrayApp::ReconcileAutoMode() {
+    if (!m_controller)
+        return;
+
+    bool shouldAutoEnable = m_autoEnableSteamlessMode &&
+                            m_controller->IsConnected() &&
+                            !m_steamRunning;
+
+    if (shouldAutoEnable && !m_controller->IsGameModeActive()) {
+        m_controller->EnableGameMode();
+    } else if (m_steamRunning && m_controller->IsGameModeActive()) {
+        m_controller->DisableGameMode();
+    }
+}
+
 static constexpr wchar_t REG_KEY[]     = L"Software\\SteamlessController";
 static constexpr wchar_t REG_RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static constexpr wchar_t APP_NAME[]    = L"SteamlessController";
@@ -201,9 +263,12 @@ void TrayApp::SetStartupEnabled(bool enabled) {
     if (enabled) {
         wchar_t path[MAX_PATH];
         GetModuleFileNameW(nullptr, path, MAX_PATH);
+        std::wstring command = L"\"";
+        command += path;
+        command += L"\"";
         RegSetValueExW(key, APP_NAME, 0, REG_SZ,
-                       reinterpret_cast<const BYTE*>(path),
-                       static_cast<DWORD>((wcslen(path) + 1) * sizeof(wchar_t)));
+                       reinterpret_cast<const BYTE*>(command.c_str()),
+                       static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
     } else {
         RegDeleteValueW(key, APP_NAME);
     }
@@ -227,6 +292,7 @@ void TrayApp::LoadSettings() {
     m_controller->SetTrackpadMouseEnabled(readBool(L"TrackpadMouse",   false));
     m_controller->SetBackButtonsEnabled  (readBool(L"BackButtons",     false));
     m_controller->SetUseLeftTrackpad     (readBool(L"UseLeftTrackpad", false));
+    m_autoEnableSteamlessMode            = readBool(L"AutoEnableSteamlessMode", true);
 
     RegCloseKey(key);
 }
@@ -247,6 +313,7 @@ void TrayApp::SaveSettings() {
     writeBool(L"TrackpadMouse",   m_controller->IsTrackpadMouseEnabled());
     writeBool(L"BackButtons",     m_controller->IsBackButtonsEnabled());
     writeBool(L"UseLeftTrackpad", m_controller->IsUseLeftTrackpad());
+    writeBool(L"AutoEnableSteamlessMode", m_autoEnableSteamlessMode);
 
     RegCloseKey(key);
 }
@@ -258,14 +325,18 @@ void TrayApp::ShowContextMenu() {
     bool backButtonsOn  = m_controller->IsBackButtonsEnabled();
     bool leftTrackpad   = m_controller->IsUseLeftTrackpad();
     bool startupOn      = IsStartupEnabled();
+    bool canEnableMode  = connected && !m_steamRunning;
 
     HMENU menu = CreatePopupMenu();
 
-    UINT toggleFlags = MF_STRING | (connected ? MF_ENABLED : MF_GRAYED);
+    UINT toggleFlags = MF_STRING | ((gameModeOn || canEnableMode) ? MF_ENABLED : MF_GRAYED);
     AppendMenuW(menu, toggleFlags, IDM_TOGGLE,
                 gameModeOn ? L"Disable Steamless Mode" : L"Enable Steamless Mode");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    UINT autoEnableFlags = MF_STRING | (m_autoEnableSteamlessMode ? MF_CHECKED : MF_UNCHECKED);
+    AppendMenuW(menu, autoEnableFlags, IDM_AUTOENABLE, L"Auto-enable Steamless Mode");
 
     UINT trackpadFlags = MF_STRING | (trackpadOn ? MF_CHECKED : MF_UNCHECKED);
     AppendMenuW(menu, trackpadFlags, IDM_TRACKPAD, L"Enable Trackpad Mouse");

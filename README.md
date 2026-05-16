@@ -6,10 +6,14 @@ A lightweight Windows system tray app that lets you use a **Steam Controller** a
 
 When **Steamless Mode** is active, the app disables the controller's built-in keyboard/mouse emulation (lizard mode) and exposes it as a virtual Xbox 360 controller via [ViGEmBus](https://github.com/nefarius/ViGEmBus), making it compatible with any game that supports XInput or the Xbox controller.
 
+By default, the tray app automatically enables Steamless Mode when the controller is available and Steam is not running. If Steam launches, the app restores lizard mode and tears down the virtual Xbox controller so Steam Input can take ownership. When Steam closes, Steamless Mode comes back automatically.
+
 ## Features
 
 - System tray icon shows connection and mode status
 - **Steamless Mode** — disables lizard mode and exposes controller as Xbox 360 gamepad
+- **Auto-enable Steamless Mode** — enabled by default and restored automatically when Steam is closed
+- **Steam-aware handoff** — disables Steamless Mode while `steam.exe` is running, then re-enables it when Steam exits
 - **Trackpad Mouse** — use the right (or left) trackpad as a mouse cursor
 - **Back Buttons for Clicking** — map R4/R5 (or L4/L5) to left/right mouse click
 - **Use Left Trackpad Instead** — mirror all trackpad/back-button functionality to the left side for left-handed users
@@ -26,7 +30,7 @@ When **Steamless Mode** is active, the app disables the controller's built-in ke
 - Windows 10 or later (64-bit)
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest) driver installed
 - Steam Controller (VID `0x28DE` / PID `0x1302`)
-- Steam **closed** (Steam claims the controller when running)
+- Steam may be running, but Steamless Mode will stay off until `steam.exe` exits
 
 ### To build
 - [Visual Studio 2022](https://visualstudio.microsoft.com/) with the **Desktop development with C++** workload

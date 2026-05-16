@@ -23,6 +23,8 @@ private:
     void ShowContextMenu();
     void LoadSettings();
     void SaveSettings();
+    bool IsSteamRunning() const;
+    void ReconcileAutoMode();
     bool IsStartupEnabled() const;
     void SetStartupEnabled(bool enabled);
 
@@ -32,6 +34,8 @@ private:
     HICON                              m_iconOff   = nullptr;
     HICON                              m_iconOn    = nullptr;
     std::unique_ptr<ControllerManager> m_controller;
+    bool                               m_autoEnableSteamlessMode = true;
+    bool                               m_steamRunning            = false;
 
     static constexpr UINT IDM_TOGGLE        = 1001;
     static constexpr UINT IDM_EXIT          = 1002;
@@ -39,6 +43,9 @@ private:
     static constexpr UINT IDM_BACKBUTTONS   = 1004;
     static constexpr UINT IDM_LEFT_TRACKPAD = 1005;
     static constexpr UINT IDM_STARTUP       = 1006;
+    static constexpr UINT IDM_AUTOENABLE    = 1007;
     static constexpr UINT WM_TRAY          = WM_APP + 1;
     static constexpr UINT TRAY_UID         = 1;
+    static constexpr UINT TIMER_STEAM_POLL = 1;
+    static constexpr UINT STEAM_POLL_MS    = 1000;
 };
