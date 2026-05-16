@@ -2,11 +2,11 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 ; Non-commercial use only
 
-#define MyAppName "SteamlessController"
+#define MyAppName "Xbox Mode Steamless Controller"
 #define MyAppVersion "1.0"
-#define MyAppPublisher "Dylan Deverill"
-#define MyAppURL "https://github.com/ddeverill/SteamlessController"
-#define MyAppExeName "SteamlessController.exe"
+#define MyAppPublisher "CommonMugger"
+#define MyAppURL "https://github.com/CommonMugger/SteamlessController"
+#define MyAppExeName "Xbox Mode Steamless Controller.exe"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -32,8 +32,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
-OutputBaseFilename=SteamlessController-Setup
-SetupIconFile=C:\Users\ddeve\iCloudDrive\Development\SteamlessController\resources\SteamControllerON.ico
+OutputBaseFilename=XboxModeSteamlessController-Setup
+SetupIconFile=SteamControllerON.ico
 SolidCompression=yes
 WizardStyle=modern
 
@@ -44,7 +44,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "C:\Users\ddeve\iCloudDrive\Development\SteamlessController\build\release\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\release\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

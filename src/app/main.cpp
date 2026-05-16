@@ -3,7 +3,7 @@
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // Prevent multiple instances.
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"SteamlessController_SingleInstance");
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"XboxModeSteamlessController_SingleInstance");
     if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (mutex) CloseHandle(mutex);
         return 0;

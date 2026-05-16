@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SteamlessController CXX)
+project(XboxModeSteamlessController CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +57,9 @@ add_executable(SteamlessController WIN32
 )
 target_include_directories(SteamlessController PRIVATE resources)
 target_link_libraries(SteamlessController PRIVATE SteamController ViGEmClient)
+set_target_properties(SteamlessController PROPERTIES
+    OUTPUT_NAME "Xbox Mode Steamless Controller"
+)
 if (MSVC)
     target_compile_options(SteamlessController PRIVATE /W4 /WX)
 endif()

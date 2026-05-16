@@ -15,7 +15,7 @@ inline std::wstring LogDirectory() {
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH);
     if (n == 0 || n >= MAX_PATH)
         return L".";
-    return std::wstring(path) + L"\\SteamlessController";
+    return std::wstring(path) + L"\\XboxModeSteamlessController";
 }
 
 inline std::wstring LogPath() {

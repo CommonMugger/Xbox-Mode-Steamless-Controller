@@ -9,7 +9,7 @@
 
 static TrayApp* g_app = nullptr;
 
-static constexpr wchar_t WNDCLASS_NAME[] = L"SteamlessControllerTray";
+static constexpr wchar_t WNDCLASS_NAME[] = L"XboxModeSteamlessControllerTray";
 
 TrayApp::TrayApp() {
     g_app = this;
@@ -34,7 +34,7 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     if (!RegisterClassExW(&wc)) return false;
 
     // Message-only window — invisible, never shown.
-    m_hwnd = CreateWindowExW(0, WNDCLASS_NAME, L"SteamlessController",
+    m_hwnd = CreateWindowExW(0, WNDCLASS_NAME, L"Xbox Mode Steamless Controller",
                              0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hInstance, nullptr);
     if (!m_hwnd) return false;
 
@@ -54,6 +54,8 @@ bool TrayApp::Init(HINSTANCE hInstance) {
 
     m_steamRunning = IsSteamRunning();
     LoadSettings();
+    if (IsStartupEnabled())
+        SetStartupEnabled(true);
     AddTrayIcon();
     UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(), false);
     SetTimer(m_hwnd, TIMER_STEAM_POLL, STEAM_POLL_MS, nullptr);
@@ -167,7 +169,7 @@ void TrayApp::AddTrayIcon() {
     nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon            = m_iconOff;
-    wcscpy_s(nid.szTip, L"Steamless Controller");
+    wcscpy_s(nid.szTip, L"Xbox Mode Steamless Controller");
     Shell_NotifyIconW(NIM_ADD, &nid);
     nid.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &nid);
@@ -185,9 +187,9 @@ void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool vigemMiss
     if (vigemMissing) { ShowViGEmBalloon(); return; }
     bool gameModeOn = gameModeActive;
 
-    const wchar_t* tip = gameModeOn  ? L"Steamless Controller — Steamless Mode ON"
-                       : connected   ? L"Steamless Controller — Connected (Steamless Mode OFF)"
-                                     : L"Steamless Controller — No controller found";
+    const wchar_t* tip = gameModeOn  ? L"Xbox Mode Steamless Controller — Steamless Mode ON"
+                       : connected   ? L"Xbox Mode Steamless Controller — Connected (Steamless Mode OFF)"
+                                     : L"Xbox Mode Steamless Controller — No controller found";
 
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
@@ -248,15 +250,17 @@ void TrayApp::ReconcileAutoMode() {
     }
 }
 
-static constexpr wchar_t REG_KEY[]     = L"Software\\SteamlessController";
+static constexpr wchar_t REG_KEY[]     = L"Software\\XboxModeSteamlessController";
 static constexpr wchar_t REG_RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-static constexpr wchar_t APP_NAME[]    = L"SteamlessController";
+static constexpr wchar_t APP_NAME[]    = L"Xbox Mode Steamless Controller";
+static constexpr wchar_t OLD_APP_NAME[] = L"SteamlessController";
 
 bool TrayApp::IsStartupEnabled() const {
     HKEY key;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_RUN_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS)
         return false;
-    bool exists = RegQueryValueExW(key, APP_NAME, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    bool exists = RegQueryValueExW(key, APP_NAME, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
+                  RegQueryValueExW(key, OLD_APP_NAME, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
     RegCloseKey(key);
     return exists;
 }
@@ -275,8 +279,10 @@ void TrayApp::SetStartupEnabled(bool enabled) {
         RegSetValueExW(key, APP_NAME, 0, REG_SZ,
                        reinterpret_cast<const BYTE*>(command.c_str()),
                        static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        RegDeleteValueW(key, OLD_APP_NAME);
     } else {
         RegDeleteValueW(key, APP_NAME);
+        RegDeleteValueW(key, OLD_APP_NAME);
     }
 
     RegCloseKey(key);
