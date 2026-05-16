@@ -26,6 +26,18 @@ void ControllerManager::OnDeviceChange() {
         Close(/*restoreLizard=*/false);
 }
 
+void ControllerManager::OnSuspend() {
+    logging::Logf("[ControllerManager] OnSuspend connected=%d gameMode=%d",
+                  m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
+    Close(/*restoreLizard=*/false);
+}
+
+void ControllerManager::OnResume() {
+    logging::Logf("[ControllerManager] OnResume");
+    Close(/*restoreLizard=*/false);
+    TryOpen();
+}
+
 void ControllerManager::EnableGameMode() {
     logging::Logf("[ControllerManager] EnableGameMode connected=%d active=%d",
                   m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
@@ -35,7 +47,12 @@ void ControllerManager::EnableGameMode() {
         return;
     }
 
-    m_virtual = std::make_unique<VirtualController>();
+    SteamController* ctrl = g_ctrl.get();
+    m_virtual = std::make_unique<VirtualController>(
+        [ctrl](uint8_t largeMotor, uint8_t smallMotor) {
+            if (ctrl)
+                ctrl->SetRumble(largeMotor, smallMotor);
+        });
     if (!m_virtual->IsValid()) {
         bool missing = m_virtual->IsDriverMissing();
         logging::Logf("[ControllerManager] EnableGameMode failed at VirtualController valid=0 missing=%d",

@@ -27,6 +27,9 @@ public:
     // data[0] must be the report ID. Padded to OutputReportByteLength automatically.
     bool SendOutputReport(const uint8_t* data, size_t size);
 
+    // Write raw bytes to the HID interrupt-OUT endpoint without report-length padding.
+    bool WriteOutputPacket(const uint8_t* data, size_t size, uint32_t timeoutMs = 1000);
+
     // Send a HID feature report (SET_REPORT Feature type via EP0 control pipe).
     // data[0] must be the feature report ID. Padded to FeatureReportByteLength automatically.
     // This is the command channel the original Steam Controller used for all firmware commands.

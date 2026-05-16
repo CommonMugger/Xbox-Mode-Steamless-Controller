@@ -1,5 +1,6 @@
 #include "TrayApp.h"
 #include "ControllerManager.h"
+#include "logging/Log.h"
 #include "resource.h"
 #include <dbt.h>
 #include <shellapi.h>
@@ -10,6 +11,97 @@
 static TrayApp* g_app = nullptr;
 
 static constexpr wchar_t WNDCLASS_NAME[] = L"XboxModeSteamlessControllerTray";
+static constexpr wchar_t REG_KEY[]       = L"Software\\XboxModeSteamlessController";
+static constexpr wchar_t REG_RUN_KEY[]   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static constexpr wchar_t APP_NAME[]      = L"Xbox Mode Steamless Controller";
+static constexpr wchar_t OLD_APP_NAME[]  = L"SteamlessController";
+
+static bool HasRunEntry(const wchar_t* name) {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_RUN_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+
+    bool exists = RegQueryValueExW(key, name, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return exists;
+}
+
+static bool IsProcessRunningByName(const wchar_t* processName) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool running = false;
+
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, processName) == 0) {
+                running = true;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return running;
+}
+
+static std::wstring GetProcessNameById(DWORD pid) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return {};
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    std::wstring name;
+
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.th32ProcessID == pid) {
+                name = entry.szExeFile;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return name;
+}
+
+static void LogLaunchContext() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    HWND shellWindow = GetShellWindow();
+    DWORD shellPid = 0;
+    wchar_t shellClass[128] = {};
+    if (shellWindow) {
+        GetWindowThreadProcessId(shellWindow, &shellPid);
+        GetClassNameW(shellWindow, shellClass, static_cast<int>(std::size(shellClass)));
+    }
+
+    std::wstring shellProcess = shellPid != 0 ? GetProcessNameById(shellPid) : L"";
+    bool explorerRunning = IsProcessRunningByName(L"explorer.exe");
+    bool steamRunning = IsProcessRunningByName(L"steam.exe");
+
+    const char* sessionKind =
+        (explorerRunning && _wcsicmp(shellProcess.c_str(), L"explorer.exe") == 0)
+            ? "desktop-like"
+            : "alternate-shell";
+
+    logging::Logf(
+        "[LaunchContext] exe=%s shellHwnd=%p shellPid=%lu shellProcess=%s shellClass=%s explorerRunning=%d steamRunning=%d inferredSession=%s",
+        logging::Narrow(exePath).c_str(),
+        shellWindow,
+        static_cast<unsigned long>(shellPid),
+        logging::Narrow(shellProcess).c_str(),
+        logging::Narrow(shellClass).c_str(),
+        explorerRunning ? 1 : 0,
+        steamRunning ? 1 : 0,
+        sessionKind);
+}
 
 TrayApp::TrayApp() {
     g_app = this;
@@ -25,6 +117,7 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     m_iconOff   = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_ICON_OFF));
     m_iconOn    = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_ICON_ON));
     m_wmTaskbar = RegisterWindowMessageW(L"TaskbarCreated");
+    LogLaunchContext();
 
     WNDCLASSEXW wc{};
     wc.cbSize        = sizeof(wc);
@@ -54,7 +147,7 @@ bool TrayApp::Init(HINSTANCE hInstance) {
 
     m_steamRunning = IsSteamRunning();
     LoadSettings();
-    if (IsStartupEnabled())
+    if (HasRunEntry(OLD_APP_NAME) && !HasRunEntry(APP_NAME))
         SetStartupEnabled(true);
     AddTrayIcon();
     UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(), false);
@@ -135,6 +228,19 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ReconcileAutoMode();
         }
         return TRUE;
+
+    case WM_POWERBROADCAST:
+        switch (wp) {
+        case PBT_APMSUSPEND:
+            m_controller->OnSuspend();
+            return TRUE;
+        case PBT_APMRESUMEAUTOMATIC:
+        case PBT_APMRESUMESUSPEND:
+            m_controller->OnResume();
+            ReconcileAutoMode();
+            return TRUE;
+        }
+        break;
 
     case WM_TIMER:
         if (wp == TIMER_STEAM_POLL) {
@@ -250,19 +356,8 @@ void TrayApp::ReconcileAutoMode() {
     }
 }
 
-static constexpr wchar_t REG_KEY[]     = L"Software\\XboxModeSteamlessController";
-static constexpr wchar_t REG_RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-static constexpr wchar_t APP_NAME[]    = L"Xbox Mode Steamless Controller";
-static constexpr wchar_t OLD_APP_NAME[] = L"SteamlessController";
-
 bool TrayApp::IsStartupEnabled() const {
-    HKEY key;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_RUN_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS)
-        return false;
-    bool exists = RegQueryValueExW(key, APP_NAME, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
-                  RegQueryValueExW(key, OLD_APP_NAME, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
-    RegCloseKey(key);
-    return exists;
+    return HasRunEntry(APP_NAME) || HasRunEntry(OLD_APP_NAME);
 }
 
 void TrayApp::SetStartupEnabled(bool enabled) {
@@ -301,7 +396,7 @@ void TrayApp::LoadSettings() {
         return def;
     };
 
-    m_controller->SetTrackpadMouseEnabled(readBool(L"TrackpadMouse",   false));
+    m_controller->SetTrackpadMouseEnabled(readBool(L"TrackpadMouse",   true));
     m_controller->SetBackButtonsEnabled  (readBool(L"BackButtons",     false));
     m_controller->SetUseLeftTrackpad     (readBool(L"UseLeftTrackpad", false));
     m_autoEnableSteamlessMode            = readBool(L"AutoEnableSteamlessMode", true);

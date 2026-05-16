@@ -197,6 +197,43 @@ bool HidDevice::SendFeatureReport(const uint8_t* data, size_t size) {
     return ok == TRUE;
 }
 
+bool HidDevice::WriteOutputPacket(const uint8_t* data, size_t size, uint32_t timeoutMs) {
+    OVERLAPPED ov{};
+    ov.hEvent = m_event;
+    ResetEvent(m_event);
+
+    DWORD bytesWritten = 0;
+    if (!WriteFile(m_handle, data, static_cast<DWORD>(size), &bytesWritten, &ov)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_IO_PENDING) {
+            logging::Logf("[HidDevice] WriteOutputPacket failed reportId=0x%02X error=%lu",
+                          size > 0 ? data[0] : 0, err);
+            return false;
+        }
+
+        DWORD wait = WaitForSingleObject(m_event, timeoutMs);
+        if (wait != WAIT_OBJECT_0) {
+            CancelIo(m_handle);
+            logging::Logf("[HidDevice] WriteOutputPacket timeout reportId=0x%02X wait=%lu",
+                          size > 0 ? data[0] : 0, wait);
+            return false;
+        }
+        if (!GetOverlappedResult(m_handle, &ov, &bytesWritten, FALSE)) {
+            logging::Logf("[HidDevice] WriteOutputPacket overlapped result failed reportId=0x%02X error=%lu",
+                          size > 0 ? data[0] : 0, GetLastError());
+            return false;
+        }
+    }
+
+    const bool ok = bytesWritten == size;
+    logging::Logf("[HidDevice] WriteOutputPacket reportId=0x%02X size=%zu bytesWritten=%lu ok=%d",
+                  size > 0 ? data[0] : 0,
+                  size,
+                  bytesWritten,
+                  ok ? 1 : 0);
+    return ok;
+}
+
 size_t HidDevice::ReadInputReport(uint8_t* buffer, size_t size, uint32_t timeoutMs) {
     OVERLAPPED ov{};
     ov.hEvent = m_event;

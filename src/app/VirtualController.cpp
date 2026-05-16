@@ -2,8 +2,10 @@
 #include "logging/Log.h"
 #include "steam/SteamController.h"
 #include <ViGEmClient.h>
-#include <cstdio>
 #include <algorithm>
+#include <cstdio>
+#include <mutex>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Report translation — 0x42 → XUSB_REPORT
@@ -64,7 +66,13 @@ static XUSB_REPORT Translate(const uint8_t* buf, size_t n) {
 // VirtualController
 // ---------------------------------------------------------------------------
 
-VirtualController::VirtualController() {
+namespace {
+std::mutex g_notificationMutex;
+std::unordered_map<void*, VirtualController*> g_targetOwners;
+}
+
+VirtualController::VirtualController(RumbleCallback onRumble)
+    : m_onRumble(std::move(onRumble)) {
     logging::Logf("[ViGEm] VirtualController ctor");
     m_client = vigem_alloc();
     if (!m_client) {
@@ -102,11 +110,30 @@ VirtualController::VirtualController() {
 
     printf("[ViGEm] Virtual Xbox 360 controller connected\n");
     logging::Logf("[ViGEm] Virtual Xbox 360 controller connected");
+
+    err = vigem_target_x360_register_notification(
+        static_cast<PVIGEM_CLIENT>(m_client),
+        static_cast<PVIGEM_TARGET>(m_target),
+        reinterpret_cast<PFN_VIGEM_X360_NOTIFICATION>(&VirtualController::ViGEmNotification));
+    if (!VIGEM_SUCCESS(err)) {
+        logging::Logf("[ViGEm] register notification failed err=0x%08X", err);
+    } else {
+        std::lock_guard<std::mutex> lock(g_notificationMutex);
+        g_targetOwners[m_target] = this;
+    }
+
     m_valid = true;
 }
 
 VirtualController::~VirtualController() {
     logging::Logf("[ViGEm] VirtualController dtor valid=%d", m_valid ? 1 : 0);
+    if (m_target) {
+        {
+            std::lock_guard<std::mutex> lock(g_notificationMutex);
+            g_targetOwners.erase(m_target);
+        }
+        vigem_target_x360_unregister_notification(static_cast<PVIGEM_TARGET>(m_target));
+    }
     if (m_client && m_target) {
         vigem_target_remove(static_cast<PVIGEM_CLIENT>(m_client),
                             static_cast<PVIGEM_TARGET>(m_target));
@@ -124,4 +151,16 @@ void VirtualController::Update(const uint8_t* buf, size_t n) {
     vigem_target_x360_update(static_cast<PVIGEM_CLIENT>(m_client),
                              static_cast<PVIGEM_TARGET>(m_target),
                              report);
+}
+
+void VirtualController::ViGEmNotification(void* client, void* target, uint8_t largeMotor, uint8_t smallMotor, uint8_t ledNumber) {
+    (void)client;
+    (void)ledNumber;
+
+    std::lock_guard<std::mutex> lock(g_notificationMutex);
+    auto it = g_targetOwners.find(target);
+    if (it == g_targetOwners.end() || !it->second->m_onRumble)
+        return;
+
+    it->second->m_onRumble(largeMotor, smallMotor);
 }

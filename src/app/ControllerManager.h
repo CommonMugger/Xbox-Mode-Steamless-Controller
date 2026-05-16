@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <memory>
+#include <cstdint>
 
 class VirtualController;
 
@@ -21,6 +22,9 @@ public:
 
     // Called when Windows reports a device arrival or removal (WM_DEVICECHANGE).
     void OnDeviceChange();
+    void OnSuspend();
+    void OnResume();
+    void RecoverIfInputStalled();
 
     // Toggle game mode on/off. No-op if controller is not connected.
     void EnableGameMode();
@@ -46,11 +50,12 @@ private:
     StateChangedFn                     m_onStateChanged;
     bool                               m_connected            = false;
     bool                               m_gameModeActive       = false;
-    bool                               m_trackpadMouseEnabled = false;
+    bool                               m_trackpadMouseEnabled = true;
     bool                               m_backButtonsEnabled   = false;
     bool                               m_useLeftTrackpad      = false;
     std::unique_ptr<VirtualController> m_virtual;
     TrackpadMouse                      m_trackpad;
     std::thread                        m_readThread;
     std::atomic<bool>                  m_readRunning{false};
+    std::atomic<std::uint64_t>         m_lastReportTickMs{0};
 };

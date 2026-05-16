@@ -1,7 +1,9 @@
 #pragma once
 #include "hid/HidDevice.h"
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <thread>
 
 class SteamController {
@@ -34,6 +36,7 @@ public:
     static constexpr uint8_t CMD_SET_DEFAULT_MAPPINGS   = 0x85;  // ← lizard on
     static constexpr uint8_t CMD_SET_SETTINGS           = 0x87;
     static constexpr uint8_t CMD_GET_SETTINGS           = 0x89;
+    static constexpr uint8_t CMD_HAPTIC_FEEDBACK        = 0x8F;
 
     // Setting key IDs (go in the payload of CMD_SET_SETTINGS)
     static constexpr uint8_t SETTING_RIGHT_TRACKPAD_MODE = 0x07;
@@ -130,10 +133,22 @@ public:
     // Returns 0 on timeout.
     size_t ReadReport(uint8_t* buffer, size_t size, uint32_t timeoutMs = 16);
 
+    // Approximate XInput rumble using the controller's left/right haptics.
+    void SetRumble(uint8_t largeMotor, uint8_t smallMotor);
+
 private:
     void HeartbeatLoop();
+    void RumbleLoop();
+    bool SendHapticCommand(uint8_t position, uint16_t amplitude, uint16_t period, uint16_t count);
 
-    HidDevice       m_device;
-    std::thread     m_heartbeat;
+    HidDevice          m_device;
+    std::thread        m_heartbeat;
+    std::thread        m_rumbleThread;
+    std::mutex         m_featureMutex;
+    std::mutex         m_rumbleMutex;
+    std::condition_variable m_rumbleCv;
     std::atomic<bool> m_running{false};
+    bool              m_rumbleStop = false;
+    uint8_t           m_largeMotor = 0;
+    uint8_t           m_smallMotor = 0;
 };
