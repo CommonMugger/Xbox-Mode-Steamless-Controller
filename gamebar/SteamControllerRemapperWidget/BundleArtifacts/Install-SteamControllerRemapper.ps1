@@ -13,14 +13,16 @@ function Ensure-Elevated {
     }
 
     $args = @(
+        '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
-        '-File', ('"' + $PSCommandPath + '"')
+        '-File', $PSCommandPath
     )
     if ($Force) {
         $args += '-Force'
     }
 
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Verb RunAs | Out-Null
+    Write-Host 'Requesting administrator privileges...'
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Verb RunAs -WindowStyle Normal | Out-Null
     exit 0
 }
 
