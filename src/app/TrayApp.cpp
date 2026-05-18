@@ -270,6 +270,20 @@ static std::vector<std::string> SplitLines(const std::string& text) {
     return lines;
 }
 
+static void DeleteFileIfExists(const std::wstring& path) {
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return;
+    DeleteFileW(path.c_str());
+}
+
+static std::string ReadWidgetResponseRequestId(const std::wstring& widgetDir) {
+    const std::vector<std::string> lines = SplitLines(ReadUtf8File(widgetDir + L"\\widget-response.txt"));
+    if (lines.empty())
+        return {};
+    return TrimAscii(lines[0]);
+}
+
 static bool IsProcessRunningByName(const wchar_t* processName) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE)
@@ -432,6 +446,12 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(), false);
     SetTimer(m_hwnd, TIMER_STEAM_POLL, STEAM_POLL_MS, nullptr);
     m_ipcServer->Start();
+    const std::wstring widgetDir = GetWidgetLocalStateDirectory();
+    if (!widgetDir.empty()) {
+        DeleteFileIfExists(widgetDir + L"\\widget-request.txt");
+        DeleteFileIfExists(widgetDir + L"\\widget-response.txt");
+        logging::Logf("[WidgetBridge] Cleared stale widget request/response files at startup");
+    }
     PublishWidgetState();
     ReconcileAutoMode();
     return true;
@@ -1096,6 +1116,12 @@ void TrayApp::ProcessWidgetBridge() {
 
     if (requestId.empty() || requestId == m_lastWidgetRequestId)
         return;
+    if (requestId == ReadWidgetResponseRequestId(widgetDir)) {
+        logging::Logf("[WidgetBridge] Ignoring already-answered request id=%s command=%s",
+                      requestId.c_str(), command.c_str());
+        m_lastWidgetRequestId = requestId;
+        return;
+    }
 
     logging::Logf("[WidgetBridge] Processing request id=%s command=%s payload=%s",
                   requestId.c_str(), command.c_str(), payload.c_str());
