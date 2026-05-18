@@ -91,6 +91,32 @@ function Enable-Startup([string]$InstalledExePath) {
     Write-Host 'Enabled Start with Windows for the current user.'
 }
 
+function Assert-WidgetInstalled([string]$PackageName) {
+    $package = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $package) {
+        throw "Widget package '$PackageName' was not registered after install."
+    }
+
+    $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
+    $gameBarExtension = $manifest.Package.Applications.Application.Extensions.Extension |
+        Where-Object { $_.Category -eq 'windows.appExtension' -and $_.AppExtension.Name -eq 'microsoft.gameBarUIExtension' } |
+        Select-Object -First 1
+
+    if (-not $gameBarExtension) {
+        throw "Widget package '$PackageName' installed, but the Game Bar extension was not found in its manifest."
+    }
+
+    Write-Host "Verified widget package registration: $($package.PackageFullName)"
+}
+
+function Restart-GameBar {
+    $processNames = @('GameBar', 'GameBarFTServer', 'XboxGameBarWidgets')
+    foreach ($name in $processNames) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force
+    }
+    Write-Host 'Restarted Xbox Game Bar background processes. Reopen Game Bar with Win+G.'
+}
+
 Ensure-Elevated
 
 $bundleRoot = Split-Path -Parent $PSCommandPath
@@ -131,6 +157,8 @@ Install-Dependencies -DependencyPaths $dependencyPaths
 
 Write-Host "Installing widget package $(Split-Path $widgetPackage.FullName -Leaf)..."
 Add-AppxPackage -Path $widgetPackage.FullName -DependencyPath $dependencyPaths
+Assert-WidgetInstalled -PackageName $packageName
+Restart-GameBar
 
 Write-Host 'Launching Steam Controller Remapper...'
 Start-Process -FilePath $installedExePath

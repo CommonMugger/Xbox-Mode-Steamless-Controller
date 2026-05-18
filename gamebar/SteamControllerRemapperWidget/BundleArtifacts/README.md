@@ -19,7 +19,7 @@ This folder is the single installer bundle for both:
 2. Right-click `Install-SteamControllerRemapper.ps1`.
 3. Choose `Run with PowerShell`.
 4. If it is not already running as administrator, it will relaunch itself elevated. Accept the elevation prompt.
-5. Let the script install the desktop app, enable Start with Windows, and install the widget.
+5. Let the script install the desktop app, enable Start with Windows, install the widget, and refresh Xbox Game Bar.
 6. Open Xbox Game Bar with `Win + G`.
 7. Add the `Steam Controller Remapper` widget from the Widgets menu.
 
