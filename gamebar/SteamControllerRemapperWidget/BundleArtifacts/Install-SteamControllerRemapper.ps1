@@ -4,6 +4,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$LogPath = Join-Path $env:TEMP 'SteamControllerRemapper-Installer.log'
+
+function Write-InstallerLog([string]$Message) {
+    $line = ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Message)
+    Add-Content -LiteralPath $LogPath -Value $line
+    Write-Host $Message
+}
 
 function Ensure-Elevated {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -21,7 +28,7 @@ function Ensure-Elevated {
         $args += '-Force'
     }
 
-    Write-Host 'Requesting administrator privileges...'
+    Write-InstallerLog 'Requesting administrator privileges...'
     Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Verb RunAs -WindowStyle Normal | Out-Null
     exit 0
 }
@@ -54,7 +61,7 @@ function Install-DesktopApp([string]$SourceExePath) {
     $shortcut.IconLocation = $targetExePath
     $shortcut.Save()
 
-    Write-Host "Installed desktop app to $installDir"
+    Write-InstallerLog "Installed desktop app to $installDir"
     return $targetExePath
 }
 
@@ -68,7 +75,7 @@ function Enable-Startup([string]$InstalledExePath) {
     }
 
     Set-ItemProperty -Path $runKeyPath -Name $valueName -Value $command -Type String
-    Write-Host 'Enabled Start with Windows for the current user.'
+    Write-InstallerLog 'Enabled Start with Windows for the current user.'
 }
 
 function Assert-WidgetInstalled([string]$PackageName) {
@@ -86,7 +93,7 @@ function Assert-WidgetInstalled([string]$PackageName) {
         throw "Widget package '$PackageName' installed, but the Game Bar extension was not found in its manifest."
     }
 
-    Write-Host "Verified widget package registration: $($package.PackageFullName)"
+    Write-InstallerLog "Verified widget package registration: $($package.PackageFullName)"
 }
 
 function Restart-GameBar {
@@ -94,11 +101,11 @@ function Restart-GameBar {
     foreach ($name in $processNames) {
         Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force
     }
-    Write-Host 'Restarted Xbox Game Bar background processes. Reopen Game Bar with Win+G.'
+    Write-InstallerLog 'Restarted Xbox Game Bar background processes. Reopen Game Bar with Win+G.'
 }
 
 function Install-WidgetPackage([string]$WidgetInstallerScriptPath) {
-    Write-Host 'Installing widget package with Add-AppDevPackage.ps1...'
+    Write-InstallerLog 'Installing widget package with Add-AppDevPackage.ps1...'
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $WidgetInstallerScriptPath -Force
     if ($LASTEXITCODE -ne 0) {
         throw "Widget package installer failed with exit code $LASTEXITCODE."
@@ -124,8 +131,8 @@ if (-not (Test-Path $widgetInstallerScript)) {
     throw "Expected widget installer script '$widgetInstallerScript' was not found."
 }
 
-Write-Host 'Steam Controller Remapper installer'
-Write-Host "Bundle root: $bundleRoot"
+Write-InstallerLog 'Steam Controller Remapper installer'
+Write-InstallerLog "Bundle root: $bundleRoot"
 
 $installedExePath = Install-DesktopApp -SourceExePath $desktopExe.FullName
 Enable-Startup -InstalledExePath $installedExePath
@@ -135,21 +142,21 @@ Import-BundleCertificate -CertificateFile $certificateFile
 $packageName = 'SteamControllerRemapperWidget'
 $installedPackage = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue
 if ($installedPackage) {
-    Write-Host "Removing previous widget package: $($installedPackage.PackageFullName)"
+    Write-InstallerLog "Removing previous widget package: $($installedPackage.PackageFullName)"
     Remove-AppxPackage -Package $installedPackage.PackageFullName
 }
 
-Install-WidgetPackage -WidgetInstallerScriptPath $widgetInstallerScript
-Assert-WidgetInstalled -PackageName $packageName
-Restart-GameBar
+try {
+    Install-WidgetPackage -WidgetInstallerScriptPath $widgetInstallerScript
+    Assert-WidgetInstalled -PackageName $packageName
+    Restart-GameBar
 
-Write-Host 'Launching Steam Controller Remapper...'
-Start-Process -FilePath $installedExePath
+    Write-InstallerLog 'Launching Steam Controller Remapper...'
+    Start-Process -FilePath $installedExePath
 
-Write-Host ''
-Write-Host 'Install complete.'
-Write-Host 'Next steps:'
-Write-Host '1. Open Xbox Game Bar with Win+G.'
-Write-Host '2. Open the Widgets menu.'
-Write-Host '3. Add "Steam Controller Remapper".'
-Write-Host '4. If you use Xbox Mode, confirm Windows shows it as a Startup app.'
+    Write-InstallerLog 'Install complete.'
+    Write-InstallerLog 'Next steps: Open Xbox Game Bar with Win+G, open the Widgets menu, and add Steam Controller Remapper.'
+} catch {
+    Write-InstallerLog ("Install failed: " + $_.Exception.Message)
+    throw
+}

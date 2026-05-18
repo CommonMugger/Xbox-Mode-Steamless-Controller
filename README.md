@@ -37,6 +37,19 @@ Current widget limitation:
 
 - Game Bar quick remaps currently edit only gamepad-button mappings. Choosing a value there will overwrite any key chord or macro on that paddle.
 
+### Tray icon and quick controls
+
+![Tray icon menu](docs/images/tray-icon.png)
+
+The tray icon is the quickest way to manage the remapper without opening the full editor. From the menu you can:
+
+- toggle Steamless Mode and auto-enable behavior
+- switch controller emulation mode
+- open `Remap Buttons...`
+- toggle trackpad mouse behavior
+- toggle `Start with Windows`
+- exit the app cleanly
+
 ## Feature set
 
 - Runs the Steam Controller as a virtual Xbox 360 controller through ViGEm
