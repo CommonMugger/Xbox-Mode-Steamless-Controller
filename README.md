@@ -55,7 +55,7 @@ Current widget limitation:
 1. Download the latest release.
 2. Install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest).
 3. Extract `SteamControllerRemapper-Installer.zip`.
-4. Run `Install-SteamControllerRemapper.ps1` as administrator.
+4. Run `Install-SteamControllerRemapper.cmd`.
 5. Launch `Steam Controller Remapper`.
 6. Open Xbox Game Bar with `Win + G` and add the `Steam Controller Remapper` widget from the widgets menu.
 
@@ -66,6 +66,7 @@ What that installer does:
 - imports the widget certificate
 - installs the Game Bar widget and dependencies
 - creates a Start Menu shortcut
+- bypasses PowerShell execution policy for the installer launch
 
 ### Desktop-only install
 

@@ -85,6 +85,7 @@ New-Item -ItemType Directory -Path (Join-Path $OutputFolder 'Desktop') | Out-Nul
 Copy-Item -LiteralPath $widgetPackage.FullName -Destination (Join-Path $OutputFolder $widgetPackage.Name)
 Copy-Item -LiteralPath $dependenciesSource -Destination (Join-Path $OutputFolder 'Dependencies') -Recurse
 Copy-Item -LiteralPath $desktopExe.FullName -Destination (Join-Path $OutputFolder 'Desktop\Steam Controller Remapper.exe')
+Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.cmd') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.cmd')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.ps1') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.ps1')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $OutputFolder 'README.md')
 
