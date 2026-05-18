@@ -10,9 +10,9 @@ This folder is the single installer bundle for both:
 - `Install-SteamControllerRemapper.cmd`
 - `Install-SteamControllerRemapper.ps1`
 - `Desktop\Steam Controller Remapper.exe`
-- `SteamControllerRemapperWidget.cer`
-- `SteamControllerRemapperWidget_*.msix`
-- `Dependencies\x64\*.appx`
+- `WidgetPackage\Add-AppDevPackage.ps1`
+- `WidgetPackage\SteamControllerRemapperWidget_*.msix`
+- `WidgetPackage\Dependencies\...`
 
 ## End-user install
 

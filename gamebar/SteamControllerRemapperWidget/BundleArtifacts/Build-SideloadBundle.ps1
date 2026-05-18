@@ -14,12 +14,17 @@ function Find-PackageFolder {
     }
 
     $candidates = Get-ChildItem -Path $appPackagesRoot -Directory | Where-Object {
-        Test-Path (Join-Path $_.FullName '*.msix')
+        (Test-Path (Join-Path $_.FullName '*.msix')) -and
+        (Test-Path (Join-Path $_.FullName 'Add-AppDevPackage.ps1'))
     }
     if ($candidates.Count -eq 0) {
         throw 'No built widget package folder was found under AppPackages.'
     }
 
+    $preferred = $candidates | Where-Object { $_.Name -like '*_x64_*' }
+    if ($preferred) {
+        return $preferred | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    }
     return $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 }
 
@@ -66,14 +71,8 @@ if ([string]::IsNullOrWhiteSpace($ZipPath)) {
 
 $packageFolder = Find-PackageFolder
 $desktopExe = Find-DesktopExe
-$widgetPackage = Get-ChildItem -Path $packageFolder.FullName -Filter *.msix -File | Select-Object -First 1
-if (-not $widgetPackage) {
-    throw "No .msix package found in $($packageFolder.FullName)"
-}
-
-$dependenciesSource = Join-Path $packageFolder.FullName 'Dependencies'
-if (-not (Test-Path $dependenciesSource)) {
-    throw "Dependencies folder missing in $($packageFolder.FullName)"
+if (-not (Test-Path (Join-Path $packageFolder.FullName 'Add-AppDevPackage.ps1'))) {
+    throw "Add-AppDevPackage.ps1 was not found in $($packageFolder.FullName)"
 }
 
 if (Test-Path $OutputFolder) {
@@ -81,9 +80,9 @@ if (Test-Path $OutputFolder) {
 }
 New-Item -ItemType Directory -Path $OutputFolder | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $OutputFolder 'Desktop') | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $OutputFolder 'WidgetPackage') | Out-Null
 
-Copy-Item -LiteralPath $widgetPackage.FullName -Destination (Join-Path $OutputFolder $widgetPackage.Name)
-Copy-Item -LiteralPath $dependenciesSource -Destination (Join-Path $OutputFolder 'Dependencies') -Recurse
+Copy-Item -LiteralPath (Join-Path $packageFolder.FullName '*') -Destination (Join-Path $OutputFolder 'WidgetPackage') -Recurse
 Copy-Item -LiteralPath $desktopExe.FullName -Destination (Join-Path $OutputFolder 'Desktop\Steam Controller Remapper.exe')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.cmd') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.cmd')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.ps1') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.ps1')

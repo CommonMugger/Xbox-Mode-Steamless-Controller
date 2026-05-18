@@ -37,26 +37,6 @@ function Get-SingleFile([string]$Root, [string]$Pattern, [string]$Description) {
     return $matches[0]
 }
 
-function Import-BundleCertificate([System.IO.FileInfo]$CertificateFile) {
-    $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CertificateFile.FullName)
-    $thumbprint = $certificate.Thumbprint
-    $existing = Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Thumbprint -eq $thumbprint }
-    if ($existing) {
-        Write-Host "Certificate already trusted: $thumbprint"
-        return
-    }
-
-    Write-Host "Importing widget certificate into LocalMachine\\TrustedPeople..."
-    Import-Certificate -FilePath $CertificateFile.FullName -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
-}
-
-function Install-Dependencies([string[]]$DependencyPaths) {
-    foreach ($dependencyPath in $DependencyPaths) {
-        Write-Host "Installing dependency $(Split-Path $dependencyPath -Leaf)..."
-        Add-AppxPackage -Path $dependencyPath -ErrorAction Stop
-    }
-}
-
 function Install-DesktopApp([string]$SourceExePath) {
     $installDir = Join-Path ${env:ProgramFiles} 'Steam Controller Remapper'
     $targetExePath = Join-Path $installDir 'Steam Controller Remapper.exe'
@@ -117,25 +97,31 @@ function Restart-GameBar {
     Write-Host 'Restarted Xbox Game Bar background processes. Reopen Game Bar with Win+G.'
 }
 
+function Install-WidgetPackage([string]$WidgetInstallerScriptPath) {
+    Write-Host 'Installing widget package with Add-AppDevPackage.ps1...'
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $WidgetInstallerScriptPath -Force
+    if ($LASTEXITCODE -ne 0) {
+        throw "Widget package installer failed with exit code $LASTEXITCODE."
+    }
+}
+
 Ensure-Elevated
 
 $bundleRoot = Split-Path -Parent $PSCommandPath
 $desktopRoot = Join-Path $bundleRoot 'Desktop'
-$dependencyRoot = Join-Path $bundleRoot 'Dependencies\x64'
+$widgetPackageRoot = Join-Path $bundleRoot 'WidgetPackage'
 
 if (-not (Test-Path $desktopRoot)) {
     throw "Expected desktop app folder '$desktopRoot' was not found."
 }
-if (-not (Test-Path $dependencyRoot)) {
-    throw "Expected dependency folder '$dependencyRoot' was not found."
+if (-not (Test-Path $widgetPackageRoot)) {
+    throw "Expected widget package folder '$widgetPackageRoot' was not found."
 }
 
 $desktopExe = Get-SingleFile -Root $desktopRoot -Pattern '*.exe' -Description 'desktop executable'
-$widgetPackage = Get-SingleFile -Root $bundleRoot -Pattern '*.msix' -Description 'widget package'
-$certificateFile = Get-SingleFile -Root $bundleRoot -Pattern '*.cer' -Description 'certificate'
-$dependencyPaths = Get-ChildItem -Path $dependencyRoot -Filter *.appx -File | Sort-Object Name | Select-Object -ExpandProperty FullName
-if (-not $dependencyPaths) {
-    throw "No dependency .appx files were found in '$dependencyRoot'."
+$widgetInstallerScript = Join-Path $widgetPackageRoot 'Add-AppDevPackage.ps1'
+if (-not (Test-Path $widgetInstallerScript)) {
+    throw "Expected widget installer script '$widgetInstallerScript' was not found."
 }
 
 Write-Host 'Steam Controller Remapper installer'
@@ -153,10 +139,7 @@ if ($installedPackage) {
     Remove-AppxPackage -Package $installedPackage.PackageFullName
 }
 
-Install-Dependencies -DependencyPaths $dependencyPaths
-
-Write-Host "Installing widget package $(Split-Path $widgetPackage.FullName -Leaf)..."
-Add-AppxPackage -Path $widgetPackage.FullName -DependencyPath $dependencyPaths
+Install-WidgetPackage -WidgetInstallerScriptPath $widgetInstallerScript
 Assert-WidgetInstalled -PackageName $packageName
 Restart-GameBar
 
