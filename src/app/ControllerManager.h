@@ -16,6 +16,19 @@
 // All public methods are safe to call from the UI thread.
 class ControllerManager {
 public:
+    struct UiNavigationState {
+        bool up = false;
+        bool down = false;
+        bool left = false;
+        bool right = false;
+        bool confirm = false;
+        bool back = false;
+        bool previous = false;
+        bool next = false;
+        bool clear = false;
+        bool record = false;
+    };
+
     using StateChangedFn = std::function<void(bool connected, bool gameModeActive, bool vigemMissing)>;
 
     explicit ControllerManager(StateChangedFn onStateChanged);
@@ -49,6 +62,7 @@ public:
     PaddleMappings GetPaddleMappings() const { return m_paddleMappings; }
     PaddleActionBindings GetPaddleActions() const { return m_paddleActions; }
     std::wstring GetCurrentMacroCaptureChord() const;
+    UiNavigationState GetUiNavigationState() const;
 
 private:
     void TryOpen();

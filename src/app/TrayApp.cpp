@@ -6,9 +6,13 @@
 #include "logging/Log.h"
 #include "resource.h"
 #include <algorithm>
+#include <chrono>
+#include <cctype>
 #include <dbt.h>
 #include <shellapi.h>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <tlhelp32.h>
 #include <winreg.h>
 
@@ -44,6 +48,228 @@ static bool OpenSettingsKeyForRead(HKEY& key) {
     return RegOpenKeyExW(HKEY_CURRENT_USER, LEGACY_REG_KEY, 0, KEY_READ, &key) == ERROR_SUCCESS;
 }
 
+static std::wstring WidenUtf8(const std::string& value) {
+    if (value.empty())
+        return {};
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0);
+    if (needed <= 0)
+        return {};
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), out.data(), needed);
+    return out;
+}
+
+static std::string TrimAscii(std::string value) {
+    auto isSpace = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    while (!value.empty() && isSpace(static_cast<unsigned char>(value.front())))
+        value.erase(value.begin());
+    while (!value.empty() && isSpace(static_cast<unsigned char>(value.back())))
+        value.pop_back();
+    return value;
+}
+
+static std::string JsonEscape(const std::wstring& value) {
+    std::ostringstream out;
+    const std::string utf8 = logging::Narrow(value);
+    for (unsigned char ch : utf8) {
+        switch (ch) {
+        case '\\': out << "\\\\"; break;
+        case '"': out << "\\\""; break;
+        case '\b': out << "\\b"; break;
+        case '\f': out << "\\f"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            if (ch < 0x20) {
+                char buffer[7];
+                std::snprintf(buffer, sizeof(buffer), "\\u%04x", ch);
+                out << buffer;
+            } else {
+                out << static_cast<char>(ch);
+            }
+        }
+    }
+    return out.str();
+}
+
+static void SendWinGToggle() {
+    INPUT inputs[4]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_LWIN;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = 'G';
+    inputs[2].type = INPUT_KEYBOARD;
+    inputs[2].ki.wVk = 'G';
+    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs[3].type = INPUT_KEYBOARD;
+    inputs[3].ki.wVk = VK_LWIN;
+    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(static_cast<UINT>(std::size(inputs)), inputs, sizeof(INPUT));
+}
+
+static void DismissGameBarAndRefocus(HWND editor) {
+    std::thread([editor]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        logging::Logf("[WidgetBridge] Sending Win+G toggle to dismiss overlay");
+        SendWinGToggle();
+        std::this_thread::sleep_for(std::chrono::milliseconds(220));
+        if (editor && IsWindow(editor)) {
+            ShowWindow(editor, SW_SHOWNORMAL);
+            BringWindowToTop(editor);
+            SetForegroundWindow(editor);
+            SetFocus(editor);
+            logging::Logf("[WidgetBridge] Refocused editor hwnd=%p after overlay dismiss", editor);
+        }
+    }).detach();
+}
+
+static std::string JsonBool(bool value) {
+    return value ? "true" : "false";
+}
+
+static std::string MappingToken(PaddleMapping mapping) {
+    switch (mapping) {
+    case PaddleMapping::A: return "A";
+    case PaddleMapping::B: return "B";
+    case PaddleMapping::X: return "X";
+    case PaddleMapping::Y: return "Y";
+    case PaddleMapping::LeftShoulder: return "LeftShoulder";
+    case PaddleMapping::RightShoulder: return "RightShoulder";
+    case PaddleMapping::View: return "View";
+    case PaddleMapping::Menu: return "Menu";
+    case PaddleMapping::LeftThumb: return "LeftThumb";
+    case PaddleMapping::RightThumb: return "RightThumb";
+    case PaddleMapping::Guide: return "Guide";
+    case PaddleMapping::DPadUp: return "DPadUp";
+    case PaddleMapping::DPadRight: return "DPadRight";
+    case PaddleMapping::DPadDown: return "DPadDown";
+    case PaddleMapping::DPadLeft: return "DPadLeft";
+    case PaddleMapping::None:
+    default:
+        return "None";
+    }
+}
+
+static std::string ActionTypeToken(PaddleActionType type) {
+    switch (type) {
+    case PaddleActionType::UseMenuMapping: return "UseMenuMapping";
+    case PaddleActionType::None: return "None";
+    case PaddleActionType::Gamepad: return "Gamepad";
+    case PaddleActionType::KeyChord: return "KeyChord";
+    case PaddleActionType::Macro: return "Macro";
+    default: return "Unknown";
+    }
+}
+
+static bool TryParseMappingToken(const std::wstring& token, PaddleMapping& mapping) {
+    PaddleAction parsed{};
+    if (!PaddleConfig::ParseActionString(L"gamepad:" + token, parsed) ||
+        parsed.type != PaddleActionType::Gamepad) {
+        return false;
+    }
+    mapping = parsed.gamepadMapping;
+    return true;
+}
+
+static PaddleAction* GetPaddleAction(PaddleActionBindings& bindings, const std::wstring& paddleId) {
+    if (_wcsicmp(paddleId.c_str(), L"L4") == 0) return &bindings.l4;
+    if (_wcsicmp(paddleId.c_str(), L"L5") == 0) return &bindings.l5;
+    if (_wcsicmp(paddleId.c_str(), L"R4") == 0) return &bindings.r4;
+    if (_wcsicmp(paddleId.c_str(), L"R5") == 0) return &bindings.r5;
+    if (_wcsicmp(paddleId.c_str(), L"QAM") == 0) return &bindings.qam;
+    return nullptr;
+}
+
+static PaddleMapping* GetPaddleMapping(PaddleMappings& mappings, const std::wstring& paddleId) {
+    if (_wcsicmp(paddleId.c_str(), L"L4") == 0) return &mappings.l4;
+    if (_wcsicmp(paddleId.c_str(), L"L5") == 0) return &mappings.l5;
+    if (_wcsicmp(paddleId.c_str(), L"R4") == 0) return &mappings.r4;
+    if (_wcsicmp(paddleId.c_str(), L"R5") == 0) return &mappings.r5;
+    if (_wcsicmp(paddleId.c_str(), L"QAM") == 0) return &mappings.qam;
+    return nullptr;
+}
+
+static void AppendBindingJson(std::ostringstream& json,
+                              const char* name,
+                              const PaddleAction& action,
+                              PaddleMapping fallback) {
+    const PaddleMapping effectiveMapping =
+        action.type == PaddleActionType::Gamepad ? action.gamepadMapping : fallback;
+    json << "\"" << name << "\":{"
+         << "\"display\":\"" << JsonEscape(PaddleConfig::Describe(action, fallback)) << "\","
+         << "\"actionType\":\"" << ActionTypeToken(action.type) << "\","
+         << "\"mappingToken\":\"" << MappingToken(effectiveMapping) << "\","
+         << "\"rapidFire\":" << JsonBool(action.rapidFire)
+         << "}";
+}
+
+static std::wstring GetLocalAppDataPath() {
+    wchar_t path[MAX_PATH] = {};
+    const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH);
+    if (size == 0 || size >= MAX_PATH)
+        return {};
+    return path;
+}
+
+static std::wstring GetWidgetLocalStateDirectory() {
+    const std::wstring localAppData = GetLocalAppDataPath();
+    if (localAppData.empty())
+        return {};
+
+    const std::wstring packagesRoot = localAppData + L"\\Packages";
+    WIN32_FIND_DATAW findData{};
+    HANDLE find = FindFirstFileW((packagesRoot + L"\\SteamControllerRemapperWidget_*").c_str(), &findData);
+    if (find == INVALID_HANDLE_VALUE)
+        return {};
+
+    std::wstring localStatePath;
+    do {
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            continue;
+        if (wcscmp(findData.cFileName, L".") == 0 || wcscmp(findData.cFileName, L"..") == 0)
+            continue;
+        localStatePath = packagesRoot + L"\\" + findData.cFileName + L"\\LocalState";
+        break;
+    } while (FindNextFileW(find, &findData));
+    FindClose(find);
+    return localStatePath;
+}
+
+static bool WriteUtf8File(const std::wstring& path, const std::string& content) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || !file)
+        return false;
+    const size_t written = std::fwrite(content.data(), 1, content.size(), file);
+    std::fclose(file);
+    return written == content.size();
+}
+
+static std::string ReadUtf8File(const std::wstring& path) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file)
+        return {};
+    std::string content;
+    char buffer[1024];
+    size_t read = 0;
+    while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0)
+        content.append(buffer, buffer + read);
+    std::fclose(file);
+    return content;
+}
+
+static std::vector<std::string> SplitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        lines.push_back(line);
+    }
+    return lines;
+}
+
 static bool IsProcessRunningByName(const wchar_t* processName) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE)
@@ -64,15 +290,6 @@ static bool IsProcessRunningByName(const wchar_t* processName) {
 
     CloseHandle(snapshot);
     return running;
-}
-
-static RemapProfile* FindProfileById(std::vector<RemapProfile>& profiles, const std::wstring& id) {
-    const std::wstring normalized = PaddleConfig::NormalizeProfileId(id);
-    for (RemapProfile& profile : profiles) {
-        if (profile.id == normalized)
-            return &profile;
-    }
-    return nullptr;
 }
 
 static std::wstring GetProcessPathById(DWORD pid) {
@@ -202,16 +419,20 @@ bool TrayApp::Init(HINSTANCE hInstance) {
         [this](bool connected, bool gameModeActive, bool vigemMissing) {
             UpdateTrayIcon(connected, gameModeActive, vigemMissing);
         });
+    m_ipcServer = std::make_unique<RemapIpcServer>(
+        [this](const std::string& request) { return HandleIpcRequest(request); });
 
     m_steamRunning = IsSteamRunning();
     LoadSettings();
     LoadPaddleConfig();
-    ApplyProfileById(m_activeProfileId, true);
+    ApplyProfileById(m_remapBackend.GetActiveProfileId(), true);
     if ((HasRunEntry(LEGACY_APP_NAME) || HasRunEntry(OLD_APP_NAME)) && !HasRunEntry(APP_NAME))
         SetStartupEnabled(true);
     AddTrayIcon();
     UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(), false);
     SetTimer(m_hwnd, TIMER_STEAM_POLL, STEAM_POLL_MS, nullptr);
+    m_ipcServer->Start();
+    PublishWidgetState();
     ReconcileAutoMode();
     return true;
 }
@@ -221,6 +442,11 @@ int TrayApp::Run() {
     BOOL ret;
     while ((ret = GetMessageW(&msg, nullptr, 0, 0)) != 0) {
         if (ret == -1) return -1;
+        if (m_paddleConfigWindow && m_paddleConfigWindow->IsOpen()) {
+            HWND paddleWindow = m_paddleConfigWindow->GetHwnd();
+            if (paddleWindow && IsDialogMessageW(paddleWindow, &msg))
+                continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -343,12 +569,17 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     ApplyProfileById(L"default");
                 }
             }
+
+            ProcessWidgetBridge();
+            PublishWidgetState();
             return 0;
         }
         break;
 
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_STEAM_POLL);
+        if (m_ipcServer)
+            m_ipcServer->Stop();
         PostQuitMessage(0);
         return 0;
     }
@@ -429,22 +660,6 @@ bool TrayApp::IsSteamRunning() const {
     return running;
 }
 
-std::vector<std::wstring> TrayApp::GetInstalledGames() const {
-    return SteamLibrary::ListInstalledGameNames();
-}
-
-std::vector<std::wstring> TrayApp::RefreshInstalledGames() const {
-    return SteamLibrary::RefreshInstalledGameNames();
-}
-
-std::vector<std::wstring> TrayApp::GetGameSourceSpecs() const {
-    return SteamLibrary::GetConfiguredSourceSpecs();
-}
-
-void TrayApp::SetGameSourceSpecs(const std::vector<std::wstring>& specs) {
-    SteamLibrary::SetConfiguredSourceSpecs(specs);
-}
-
 bool TrayApp::GetAutoSwitchProfiles() const {
     return m_autoSwitchProfiles;
 }
@@ -454,6 +669,7 @@ void TrayApp::SetAutoSwitchProfiles(bool enabled) {
     if (!enabled)
         m_manualProfileOverride = false;
     SaveSettings();
+    PublishWidgetState();
 }
 
 std::wstring TrayApp::GetDetectedGameProfileId() const {
@@ -477,10 +693,10 @@ std::wstring TrayApp::GetDetectedGameProfileId() const {
         return foregroundMatch;
     }
 
-    if (m_activeProfileId != L"default") {
+    if (m_remapBackend.GetActiveProfileId() != L"default") {
         const std::wstring runningMatch =
-            PaddleConfig::NormalizeProfileId(SteamLibrary::MatchProcessListToInstalledGame(GetRunningProcessPaths()));
-        if (runningMatch == m_activeProfileId) {
+            PaddleConfig::NormalizeProfileId(m_remapBackend.MatchProcessListToInstalledGame(GetRunningProcessPaths()));
+        if (runningMatch == m_remapBackend.GetActiveProfileId()) {
             logging::Logf("[Profiles] Keeping active running profile id=%s",
                           logging::Narrow(runningMatch).c_str());
             return runningMatch;
@@ -490,39 +706,14 @@ std::wstring TrayApp::GetDetectedGameProfileId() const {
     return {};
 }
 
-RemapProfile* TrayApp::EnsureProfileExists(const std::wstring& profileId, const std::wstring& baseProfileId) {
-    const std::wstring normalizedId = PaddleConfig::NormalizeProfileId(profileId);
-    if (normalizedId.empty())
-        return nullptr;
-
-    if (RemapProfile* existing = FindProfileById(m_profiles, normalizedId))
-        return existing;
-
-    const std::wstring normalizedBaseId = PaddleConfig::NormalizeProfileId(baseProfileId);
-    const RemapProfile* base = FindProfileById(m_profiles, normalizedBaseId);
-    if (!base)
-        base = FindProfileById(m_profiles, L"default");
-
-    RemapProfile profile = base ? *base : RemapProfile{};
-    profile.id = normalizedId;
-    m_profiles.push_back(std::move(profile));
-    PersistProfiles();
-    logging::Logf("[Profiles] Created profile id=%s base=%s",
-                  logging::Narrow(normalizedId).c_str(),
-                  logging::Narrow(base ? base->id : std::wstring(L"default")).c_str());
-    return &m_profiles.back();
-}
-
 void TrayApp::ApplyProfileById(const std::wstring& profileId, bool force) {
-    const std::wstring normalizedId = PaddleConfig::NormalizeProfileId(profileId);
-    if (!force && normalizedId == m_activeProfileId)
+    if (!m_remapBackend.SetActiveProfileId(profileId, force))
         return;
 
-    const RemapProfile* profile = EnsureProfileExists(normalizedId);
+    const RemapProfile* profile = m_remapBackend.GetActiveProfile();
     if (!profile)
         return;
 
-    m_activeProfileId = normalizedId;
     m_controller->SetPaddleMapping(0, profile->mappings.l4);
     m_controller->SetPaddleMapping(1, profile->mappings.l5);
     m_controller->SetPaddleMapping(2, profile->mappings.r4);
@@ -533,11 +724,8 @@ void TrayApp::ApplyProfileById(const std::wstring& profileId, bool force) {
     if (m_paddleConfigWindow && m_paddleConfigWindow->IsOpen())
         m_paddleConfigWindow->ReloadFromModel();
     logging::Logf("[Profiles] Applied profile id=%s",
-                  logging::Narrow(m_activeProfileId).c_str());
-}
-
-void TrayApp::PersistProfiles() {
-    PaddleConfig::SaveProfiles(m_profiles);
+                  logging::Narrow(m_remapBackend.GetActiveProfileId()).c_str());
+    PublishWidgetState();
 }
 
 void TrayApp::ReconcileAutoMode() {
@@ -616,7 +804,6 @@ void TrayApp::LoadSettings() {
     m_controller->SetPaddleMapping(2, static_cast<PaddleMapping>(readDword(L"PaddleMapR4", 0)));
     m_controller->SetPaddleMapping(3, static_cast<PaddleMapping>(readDword(L"PaddleMapR5", 0)));
     m_controller->SetPaddleMapping(4, static_cast<PaddleMapping>(readDword(L"PaddleMapQAM", 0)));
-    m_activeProfileId = L"default";
     m_manualProfileOverride = false;
 
     RegCloseKey(key);
@@ -657,7 +844,7 @@ void TrayApp::SaveSettings() {
     writeDword(L"PaddleMapR4", static_cast<DWORD>(paddles.r4));
     writeDword(L"PaddleMapR5", static_cast<DWORD>(paddles.r5));
     writeDword(L"PaddleMapQAM", static_cast<DWORD>(paddles.qam));
-    writeString(REG_LAST_PROFILE, m_activeProfileId);
+    writeString(REG_LAST_PROFILE, m_remapBackend.GetActiveProfileId());
     writeBool(REG_MANUAL_OVERRIDE, m_manualProfileOverride);
 
     RegCloseKey(key);
@@ -667,57 +854,280 @@ void TrayApp::LoadPaddleConfig() {
     PaddleConfig::EnsureExists();
     PaddleActionBindings legacyActions = PaddleConfig::Load();
     PaddleMappings legacyMappings = m_controller->GetPaddleMappings();
-    m_profiles = PaddleConfig::LoadProfiles(legacyMappings, legacyActions);
+    m_remapBackend.Load(legacyMappings, legacyActions);
 }
 
 void TrayApp::ShowPaddleConfigWindow() {
     if (!m_paddleConfigWindow) {
         m_paddleConfigWindow = std::make_unique<PaddleConfigWindow>(
-            [this]() {
-                const RemapProfile* profile = FindProfileById(m_profiles, m_activeProfileId);
-                return profile ? profile->mappings : PaddleMappings{};
-            },
-            [this]() {
-                const RemapProfile* profile = FindProfileById(m_profiles, m_activeProfileId);
-                return profile ? profile->actions : PaddleActionBindings{};
-            },
+            m_remapBackend,
             [this]() { return m_controller->GetCurrentMacroCaptureChord(); },
-            [this]() { return m_activeProfileId; },
-            [this]() { return GetInstalledGames(); },
-            [this]() { return RefreshInstalledGames(); },
-            [this]() { return GetGameSourceSpecs(); },
-            [this](const std::vector<std::wstring>& specs) { SetGameSourceSpecs(specs); },
+            [this]() { return m_controller->GetUiNavigationState(); },
             [this]() { return GetAutoSwitchProfiles(); },
             [this](bool enabled) { SetAutoSwitchProfiles(enabled); },
-            [this](const std::wstring& profileId) {
-                const std::wstring normalizedId = PaddleConfig::NormalizeProfileId(profileId);
-                EnsureProfileExists(normalizedId);
+            [this](const std::wstring& profileId, bool force) {
                 m_manualProfileOverride = true;
-                ApplyProfileById(normalizedId, true);
-            },
-            [this](const std::wstring& profileId) {
-                const std::wstring normalizedId = PaddleConfig::NormalizeProfileId(profileId);
-                m_profiles.erase(std::remove_if(m_profiles.begin(), m_profiles.end(),
-                    [&](const RemapProfile& profile) { return profile.id == normalizedId; }),
-                    m_profiles.end());
-                PersistProfiles();
-                ApplyProfileById(L"default", true);
-            },
-            [this](const PaddleMappings& mappings, const PaddleActionBindings& actions) {
-                RemapProfile* profile = FindProfileById(m_profiles, m_activeProfileId);
-                if (!profile) {
-                    m_profiles.push_back(RemapProfile{ m_activeProfileId, mappings, actions });
-                    profile = &m_profiles.back();
-                } else {
-                    profile->mappings = mappings;
-                    profile->actions = actions;
-                }
-                PersistProfiles();
-                ApplyProfileById(m_activeProfileId, true);
+                ApplyProfileById(profileId, force);
             });
     }
 
     m_paddleConfigWindow->Show(m_hInstance, m_hwnd);
+}
+
+std::string TrayApp::HandleIpcRequest(const std::string& request) {
+    const std::string trimmed = TrimAscii(request);
+    if (trimmed.empty())
+        return "ERR\tempty-request";
+
+    size_t split = trimmed.find('\t');
+    if (split == std::string::npos)
+        split = trimmed.find(' ');
+    const std::string command = split == std::string::npos ? trimmed : trimmed.substr(0, split);
+    const std::string payload = split == std::string::npos ? std::string{} : TrimAscii(trimmed.substr(split + 1));
+
+    if (command == "GET_STATE") {
+        const std::wstring activeProfileId = m_remapBackend.GetActiveProfileId();
+        const std::wstring detectedProfileId = GetDetectedGameProfileId();
+        std::ostringstream json;
+        json << "{\"activeProfileId\":\"" << JsonEscape(activeProfileId)
+             << "\",\"detectedProfileId\":\"" << JsonEscape(detectedProfileId)
+             << "\",\"autoSwitchProfiles\":" << JsonBool(m_autoSwitchProfiles)
+             << ",\"steamRunning\":" << JsonBool(m_steamRunning)
+             << "}";
+        return "OK\t" + json.str();
+    }
+
+    if (command == "LIST_GAMES") {
+        const std::vector<std::wstring> games = m_remapBackend.GetInstalledGames();
+        std::ostringstream json;
+        json << "[";
+        for (size_t i = 0; i < games.size(); ++i) {
+            if (i != 0)
+                json << ",";
+            json << "\"" << JsonEscape(games[i]) << "\"";
+        }
+        json << "]";
+        return "OK\t" + json.str();
+    }
+
+    if (command == "APPLY_PROFILE") {
+        const std::wstring profileId = WidenUtf8(payload);
+        if (profileId.empty())
+            return "ERR\tmissing-profile-id";
+        m_manualProfileOverride = true;
+        ApplyProfileById(profileId, true);
+        return "OK\t{\"activeProfileId\":\"" + JsonEscape(m_remapBackend.GetActiveProfileId()) + "\"}";
+    }
+
+    if (command == "GET_PROFILE") {
+        const std::wstring profileId = payload.empty() ? m_remapBackend.GetActiveProfileId() : WidenUtf8(payload);
+        const RemapProfile* profile = m_remapBackend.GetProfileById(profileId);
+        if (!profile)
+            return "ERR\tprofile-not-found";
+
+        auto describe = [&](const PaddleAction& action, PaddleMapping fallback) {
+            return JsonEscape(PaddleConfig::Describe(action, fallback));
+        };
+
+        std::ostringstream json;
+        json << "{"
+             << "\"id\":\"" << JsonEscape(profile->id) << "\","
+             << "\"l4\":\"" << describe(profile->actions.l4, profile->mappings.l4) << "\","
+             << "\"l5\":\"" << describe(profile->actions.l5, profile->mappings.l5) << "\","
+             << "\"r4\":\"" << describe(profile->actions.r4, profile->mappings.r4) << "\","
+             << "\"r5\":\"" << describe(profile->actions.r5, profile->mappings.r5) << "\","
+             << "\"qam\":\"" << describe(profile->actions.qam, profile->mappings.qam) << "\""
+             << "}";
+        return "OK\t" + json.str();
+    }
+
+    if (command == "SET_AUTO_SWITCH") {
+        if (payload != "0" && payload != "1")
+            return "ERR\tinvalid-auto-switch";
+        SetAutoSwitchProfiles(payload == "1");
+        return "OK\t{\"autoSwitchProfiles\":" + JsonBool(m_autoSwitchProfiles) + "}";
+    }
+
+    if (command == "OPEN_DESKTOP_EDITOR") {
+        if (m_steamRunning)
+            return "ERR\tsteam-running";
+        logging::Logf("[WidgetBridge] OPEN_DESKTOP_EDITOR begin");
+        ShowPaddleConfigWindow();
+        if (m_paddleConfigWindow && m_paddleConfigWindow->GetHwnd()) {
+            HWND editor = m_paddleConfigWindow->GetHwnd();
+            ShowWindow(editor, SW_SHOWNORMAL);
+            BringWindowToTop(editor);
+            SetForegroundWindow(editor);
+            SetFocus(editor);
+            logging::Logf("[WidgetBridge] OPEN_DESKTOP_EDITOR focused hwnd=%p", editor);
+            DismissGameBarAndRefocus(editor);
+        }
+        return "OK\t{\"desktopEditorOpened\":true}";
+    }
+
+    if (command == "SET_PROFILE_GAMEPAD_BINDING") {
+        std::string profileToken;
+        std::string paddleToken;
+        std::string mappingToken;
+        std::istringstream payloadStream(payload);
+        std::getline(payloadStream, profileToken, '\t');
+        std::getline(payloadStream, paddleToken, '\t');
+        std::getline(payloadStream, mappingToken);
+
+        const std::wstring profileId = WidenUtf8(TrimAscii(profileToken));
+        const std::wstring paddleId = WidenUtf8(TrimAscii(paddleToken));
+        const std::wstring mappingId = WidenUtf8(TrimAscii(mappingToken));
+        if (profileId.empty() || paddleId.empty() || mappingId.empty())
+            return "ERR\tinvalid-binding-payload";
+
+        PaddleMapping mapping = PaddleMapping::None;
+        if (!TryParseMappingToken(mappingId, mapping))
+            return "ERR\tinvalid-binding-mapping";
+
+        RemapProfile* profile = m_remapBackend.EnsureProfileExists(profileId);
+        if (!profile)
+            return "ERR\tprofile-not-found";
+
+        PaddleAction* action = GetPaddleAction(profile->actions, paddleId);
+        PaddleMapping* fallback = GetPaddleMapping(profile->mappings, paddleId);
+        if (!action || !fallback)
+            return "ERR\tinvalid-paddle-id";
+
+        *fallback = mapping;
+        action->type = mapping == PaddleMapping::None ? PaddleActionType::None : PaddleActionType::Gamepad;
+        action->gamepadMapping = mapping;
+        action->chord.clear();
+        action->macroSteps.clear();
+        action->rapidFire = false;
+        m_remapBackend.PersistProfiles();
+
+        const std::wstring normalizedProfileId = PaddleConfig::NormalizeProfileId(profileId);
+        if (m_remapBackend.GetActiveProfileId() == normalizedProfileId)
+            ApplyProfileById(normalizedProfileId, true);
+
+        std::ostringstream json;
+        json << "{"
+             << "\"profileId\":\"" << JsonEscape(normalizedProfileId) << "\","
+             << "\"paddle\":\"" << JsonEscape(paddleId) << "\","
+             << "\"mappingToken\":\"" << MappingToken(mapping) << "\""
+             << "}";
+        return "OK\t" + json.str();
+    }
+
+    return "ERR\tunknown-command";
+}
+
+void TrayApp::PublishWidgetState() {
+    const std::wstring widgetDir = GetWidgetLocalStateDirectory();
+    if (widgetDir.empty()) {
+        static bool loggedMissingDir = false;
+        if (!loggedMissingDir) {
+            logging::Logf("[WidgetBridge] No widget LocalState directory found");
+            loggedMissingDir = true;
+        }
+        return;
+    }
+
+    static std::wstring lastLoggedWidgetDir;
+    if (widgetDir != lastLoggedWidgetDir) {
+        logging::Logf("[WidgetBridge] Publishing to %s", logging::Narrow(widgetDir).c_str());
+        lastLoggedWidgetDir = widgetDir;
+    }
+
+    CreateDirectoryW(widgetDir.c_str(), nullptr);
+
+    const std::vector<std::wstring> games = m_remapBackend.GetInstalledGames();
+    const std::wstring activeProfileId = m_remapBackend.GetActiveProfileId();
+    const std::wstring detectedProfileId = GetDetectedGameProfileId();
+    const RemapProfile* profile = m_remapBackend.GetActiveProfile();
+
+    std::ostringstream json;
+    json << "{"
+         << "\"activeProfileId\":\"" << JsonEscape(activeProfileId) << "\","
+         << "\"detectedProfileId\":\"" << JsonEscape(detectedProfileId) << "\","
+         << "\"autoSwitchProfiles\":" << JsonBool(m_autoSwitchProfiles) << ","
+         << "\"steamRunning\":" << JsonBool(m_steamRunning) << ","
+         << "\"installedGames\":[";
+    for (size_t i = 0; i < games.size(); ++i) {
+        if (i != 0)
+            json << ",";
+        json << "\"" << JsonEscape(games[i]) << "\"";
+    }
+    json << "]";
+    if (profile) {
+        json << ",\"profile\":{"
+             << "\"id\":\"" << JsonEscape(profile->id) << "\",";
+        AppendBindingJson(json, "l4", profile->actions.l4, profile->mappings.l4);
+        json << ",";
+        AppendBindingJson(json, "l5", profile->actions.l5, profile->mappings.l5);
+        json << ",";
+        AppendBindingJson(json, "r4", profile->actions.r4, profile->mappings.r4);
+        json << ",";
+        AppendBindingJson(json, "r5", profile->actions.r5, profile->mappings.r5);
+        json << ",";
+        AppendBindingJson(json, "qam", profile->actions.qam, profile->mappings.qam);
+        json << "}";
+    }
+    json << "}";
+
+    const std::string text = json.str();
+    if (text == m_lastWidgetStateJson)
+        return;
+
+    if (WriteUtf8File(widgetDir + L"\\widget-state.json", text)) {
+        m_lastWidgetStateJson = text;
+    } else {
+        logging::Logf("[WidgetBridge] Failed writing widget-state.json");
+    }
+}
+
+void TrayApp::ProcessWidgetBridge() {
+    const std::wstring widgetDir = GetWidgetLocalStateDirectory();
+    if (widgetDir.empty())
+        return;
+
+    const std::vector<std::string> lines = SplitLines(ReadUtf8File(widgetDir + L"\\widget-request.txt"));
+    if (lines.size() < 2)
+        return;
+
+    const std::string requestId = TrimAscii(lines[0]);
+    const std::string command = TrimAscii(lines[1]);
+    const std::string payload = lines.size() >= 3 ? TrimAscii(lines[2]) : std::string{};
+
+    if (requestId.empty() || requestId == m_lastWidgetRequestId)
+        return;
+
+    logging::Logf("[WidgetBridge] Processing request id=%s command=%s payload=%s",
+                  requestId.c_str(), command.c_str(), payload.c_str());
+
+    std::string response = "ERR\tunknown-command";
+    if (command == "APPLY_PROFILE") {
+        response = HandleIpcRequest("APPLY_PROFILE\t" + payload);
+    } else if (command == "SET_AUTO_SWITCH") {
+        response = HandleIpcRequest("SET_AUTO_SWITCH\t" + payload);
+    } else if (command == "REFRESH_LIBRARY") {
+        m_remapBackend.RefreshInstalledGames();
+        response = "OK\t{\"refreshed\":true}";
+    } else if (command == "OPEN_DESKTOP_EDITOR") {
+        response = HandleIpcRequest("OPEN_DESKTOP_EDITOR");
+    } else if (command == "SET_PROFILE_GAMEPAD_BINDING") {
+        response = HandleIpcRequest("SET_PROFILE_GAMEPAD_BINDING\t" + payload);
+    }
+
+    std::ostringstream out;
+    out << requestId << "\n";
+    if (response.rfind("OK\t", 0) == 0) {
+        out << "OK\n" << response.substr(3) << "\n";
+    } else if (response.rfind("ERR\t", 0) == 0) {
+        out << "ERR\n" << response.substr(4) << "\n";
+    } else {
+        out << "ERR\n" << response << "\n";
+    }
+
+    if (WriteUtf8File(widgetDir + L"\\widget-response.txt", out.str()))
+        m_lastWidgetRequestId = requestId;
+    else
+        logging::Logf("[WidgetBridge] Failed writing widget-response.txt");
 }
 
 void TrayApp::ShowContextMenu() {

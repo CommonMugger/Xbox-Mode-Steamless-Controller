@@ -25,3 +25,10 @@ CMakeUserPresets.json
 .vs/
 *.user
 *.suo
+
+# Game Bar widget generated output
+gamebar/SteamControllerRemapperWidget/AppPackages/
+gamebar/SteamControllerRemapperWidget/bin/
+gamebar/SteamControllerRemapperWidget/obj/
+gamebar/SteamControllerRemapperWidget/BundleArtifacts/SteamControllerRemapperWidget-Sideload/
+gamebar/SteamControllerRemapperWidget/BundleArtifacts/SteamControllerRemapperWidget-Sideload.zip

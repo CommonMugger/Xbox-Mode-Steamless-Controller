@@ -1,4 +1,6 @@
 #pragma once
+#include "ControllerManager.h"
+#include "RemapBackend.h"
 #include "VirtualController.h"
 #include <Windows.h>
 #include <commctrl.h>
@@ -9,39 +11,26 @@
 
 class PaddleConfigWindow {
 public:
-    using SaveFn = std::function<void(const PaddleMappings&, const PaddleActionBindings&)>;
-    using LoadMappingsFn = std::function<PaddleMappings()>;
-    using LoadActionsFn = std::function<PaddleActionBindings()>;
     using ControllerChordFn = std::function<std::wstring()>;
-    using LoadProfileIdFn = std::function<std::wstring()>;
-    using ListInstalledGamesFn = std::function<std::vector<std::wstring>()>;
-    using RefreshInstalledGamesFn = std::function<std::vector<std::wstring>()>;
-    using LoadGameSourcesFn = std::function<std::vector<std::wstring>()>;
-    using SaveGameSourcesFn = std::function<void(const std::vector<std::wstring>&)>;
+    using ControllerUiState = ControllerManager::UiNavigationState;
+    using ControllerUiStateFn = std::function<ControllerUiState()>;
     using LoadAutoSwitchFn = std::function<bool()>;
     using SaveAutoSwitchFn = std::function<void(bool)>;
-    using SelectProfileFn = std::function<void(const std::wstring&)>;
-    using DeleteProfileFn = std::function<void(const std::wstring&)>;
+    using ApplyProfileFn = std::function<void(const std::wstring&, bool force)>;
 
-    PaddleConfigWindow(LoadMappingsFn loadMappings,
-                       LoadActionsFn loadActions,
+    PaddleConfigWindow(RemapBackend& backend,
                        ControllerChordFn controllerChordFn,
-                       LoadProfileIdFn loadProfileId,
-                       ListInstalledGamesFn listInstalledGames,
-                       RefreshInstalledGamesFn refreshInstalledGames,
-                       LoadGameSourcesFn loadGameSources,
-                       SaveGameSourcesFn saveGameSources,
+                       ControllerUiStateFn controllerUiStateFn,
                        LoadAutoSwitchFn loadAutoSwitch,
                        SaveAutoSwitchFn saveAutoSwitch,
-                       SelectProfileFn onSelectProfile,
-                       DeleteProfileFn onDeleteProfile,
-                       SaveFn onSave);
+                       ApplyProfileFn onApplyProfile);
     ~PaddleConfigWindow() = default;
 
     void Show(HINSTANCE hInstance, HWND owner);
     void Close();
     void ReloadFromModel();
     bool IsOpen() const { return m_hwnd != nullptr; }
+    HWND GetHwnd() const { return m_hwnd; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -50,10 +39,11 @@ private:
     void CreateControls();
     void RefreshFromModel();
     void RefreshProfileState();
+    void RefreshBindingSummary();
     void RefreshEditorForSelectedPaddle();
+    void RefreshControllerFocus();
     void UpdateControlState();
     void RecordMacro();
-    void ClearSelection();
     void CommitPendingChanges();
     void PersistCurrentState();
     void ApplySelection();
@@ -66,6 +56,24 @@ private:
     void SetRefreshUiState(bool refreshing, const wchar_t* statusText = nullptr);
     int CurrentModeSelection() const;
     void SetModeSelectionForCurrent(int modeIndex);
+    void HandleControllerTimer();
+    void MoveControllerFocus(int delta);
+    void CycleCurrentProfile(int delta);
+    void CycleCurrentPaddle(int delta);
+    void CycleCurrentMode(int delta);
+    void CycleCurrentGamepad(int delta);
+    void CycleGameSourceSelection(int delta);
+    void ToggleAutoSwitch();
+    void ActivateFocusedControl();
+    bool FocusControllerControl(HWND target);
+    HWND ControllerFocusHwnd() const;
+    void InvalidateFocusOutline(HWND control);
+    void InvalidatePreviewArea();
+    HWND FocusedComboForController() const;
+    bool IsControllerComboDropped(HWND combo) const;
+    void ToggleControllerComboDropdown(HWND combo);
+    void StepControllerComboSelection(HWND combo, int delta);
+    void CommitControllerComboSelection(HWND combo);
     void Paint(HDC hdc);
     RECT PaddleRect(int paddleIndex) const;
     POINT PaddleAnchor(int paddleIndex) const;
@@ -82,8 +90,11 @@ private:
     HWND m_comboGamepad = nullptr;
     HWND m_editBinding = nullptr;
     HWND m_staticBinding = nullptr;
+    HWND m_staticBindingHelp = nullptr;
     HWND m_staticSelected = nullptr;
     HWND m_staticProfile = nullptr;
+    HWND m_comboPaddleSelect = nullptr;
+    HWND m_staticBindingSummary = nullptr;
     HWND m_comboGameProfiles = nullptr;
     HWND m_buttonRefreshLibrary = nullptr;
     HWND m_listGameSources = nullptr;
@@ -95,22 +106,15 @@ private:
     HWND m_checkAutoSwitch = nullptr;
     HWND m_checkRapid = nullptr;
     HWND m_buttonRecord = nullptr;
-    HWND m_buttonClear = nullptr;
     HWND m_hoverLabelPopup = nullptr;
     HWND m_tooltip = nullptr;
 
-    LoadMappingsFn m_loadMappings;
-    LoadActionsFn  m_loadActions;
+    RemapBackend& m_backend;
     ControllerChordFn m_controllerChordFn;
-    LoadProfileIdFn m_loadProfileId;
-    ListInstalledGamesFn m_listInstalledGames;
-    RefreshInstalledGamesFn m_refreshInstalledGames;
-    LoadGameSourcesFn m_loadGameSources;
-    SaveGameSourcesFn m_saveGameSources;
+    ControllerUiStateFn m_controllerUiStateFn;
     LoadAutoSwitchFn m_loadAutoSwitch;
     SaveAutoSwitchFn m_saveAutoSwitch;
-    SelectProfileFn m_onSelectProfile;
-    SaveFn         m_onSave;
+    ApplyProfileFn m_onApplyProfile;
 
     PaddleMappings       m_mappings{};
     PaddleActionBindings m_actions{};
@@ -118,7 +122,9 @@ private:
     int                  m_hoveredTooltipPaddle = -1;
     bool                 m_updatingControls = false;
     bool                 m_autoSwitchProfiles = false;
+    int                  m_controllerFocusIndex = 0;
     std::array<int, 5>   m_modeSelections = { 0, 0, 0, 0, 0 };
+    ControllerUiState    m_lastControllerUiState{};
     std::wstring         m_tooltipText;
     std::wstring         m_editProfileId = L"default";
     std::vector<std::wstring> m_gameSourceSpecs;

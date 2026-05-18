@@ -17,15 +17,34 @@
    - profile selection
    - per-paddle remap controls
    - immediate save/apply
-5. Define a controller-friendly navigation model for the widget so it works without mouse/keyboard dependence.
-6. Decide how the widget invokes advanced flows that may still belong to the desktop UI.
-7. Add debug logging around widget open, profile apply, remap save, and detected-game refresh.
-8. Test widget behavior across:
+5. Add an `Open full desktop editor` action so the widget can hand off advanced edits cleanly.
+6. Define a controller-friendly navigation model for the widget so it works without mouse/keyboard dependence.
+7. Decide how the widget invokes advanced flows that may still belong to the desktop UI.
+8. Add debug logging around widget open, profile apply, remap save, and detected-game refresh.
+9. Test widget behavior across:
    - Xbox app / Game Pass titles
    - Steam titles
    - no-game / desktop state
    - Steam-running-disabled state
-9. After v1 works, decide which current desktop-only actions should also be exposed in the widget.
+10. After v1 works, decide which current desktop-only actions should also be exposed in the widget.
+
+## Controller-Friendly Desktop UI
+
+1. Define a controller-first navigation model for the remap window:
+   - focus order
+   - selected control styling
+   - confirm/back semantics
+   - shoulder/trigger shortcuts where useful
+2. Make the installed-game list, source list, and remap editors navigable without mouse hover dependence.
+3. Replace hover-only affordances with focusable or explicit actions so bindings and statuses are visible from controller navigation alone.
+4. Add large, predictable focus targets for:
+   - profile selection
+   - paddle selection
+   - action type
+   - gamepad target
+   - save/reset/open-editor actions
+5. Add controller-driven open/close behavior that works cleanly while Game Bar or Xbox mode is active.
+6. Test the remap window end to end without touching mouse or keyboard.
 
 ## Identity / Rename
 

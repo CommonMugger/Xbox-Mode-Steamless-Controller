@@ -1,99 +1,108 @@
 # Steam Controller Remapper
 
-A lightweight Windows system tray app that lets you use a **Steam Controller** as a standard gamepad without Steam running.
+Steam Controller Remapper is a Windows tray app for using a **Steam Controller** without Steam Input taking over. It disables lizard mode, exposes the controller as a virtual Xbox 360 pad through [ViGEmBus](https://github.com/nefarius/ViGEmBus), and layers game-aware paddle profiles on top.
 
-Steam Controller Remapper is the standalone continuation of this project, focused on reliable **Steam Controller** remapping and profile switching across desktop, Steam, and **Xbox Mode** use.
+It now has two editing surfaces:
 
-**Important:** for Xbox Mode startup to work reliably, Windows Startup Apps must be set to **System startup**, not **Desktop startup**, for `Steam Controller Remapper`.
+- a full desktop remapper for profile setup, sources, macros, and controller-first editing
+- an Xbox Game Bar widget for in-session profile switching and quick paddle remaps
 
-<img width="261" height="194" alt="image" src="https://github.com/user-attachments/assets/8e4a1355-d854-4b67-a486-590d225700f5" />
+## At a glance
 
-When **Steamless Mode** is active, the app disables the controller's built-in keyboard/mouse emulation (lizard mode) and exposes it as a virtual Xbox 360 controller via [ViGEmBus](https://github.com/nefarius/ViGEmBus), making it compatible with any game that supports XInput or the Xbox controller.
+### Desktop remapper
 
-By default, the tray app automatically enables Steamless Mode when the controller is available and Steam is not running. If Steam launches, the app restores lizard mode and tears down the virtual Xbox controller so Steam Input can take ownership. When Steam closes, Steamless Mode comes back automatically.
+![Desktop remapper](docs/images/remapper.png)
 
-## Features
+The desktop editor is the full configuration surface. Use it to:
 
-- System tray icon shows connection and mode status
-- **Steamless Mode** disables lizard mode and exposes the controller as an Xbox 360 gamepad
-- **Auto-enable Steamless Mode** restores the virtual controller automatically when Steam is closed
-- **Steam-aware handoff** disables Steamless Mode while `steam.exe` is running, then re-enables it when Steam exits
-- **Xbox Mode recovery** retries controller discovery after boot until the Steam Controller HID interface is actually ready
-- **Trackpad Mouse** uses the right or left trackpad as a mouse cursor
-- **Back Buttons for Clicking** maps R4/R5 or L4/L5 to left and right mouse click
-- **Use Left Trackpad Instead** mirrors all trackpad/back-button functionality to the left side
-- **Start with Windows** launches automatically at login
-- Settings persist across restarts
-- Single-instance guard so it is safe to leave running
+- build and edit per-game profiles
+- add multiple game library folders or direct game `.exe` sources
+- refresh and cache the installed-game list
+- create gamepad, shortcut, macro, or unbound paddle actions
+- enable rapid fire where it applies
+- use controller navigation instead of relying on mouse-only interaction
 
-<img width="482" height="302" alt="image" src="https://github.com/user-attachments/assets/62e274a5-9d23-4af2-aaca-0f3ecdca3feb" />
+### Xbox Game Bar widget
+
+![Game Bar widget](docs/images/gamebar-widget.png)
+
+The widget is the quick-access surface for Xbox Mode and in-game use. Use it to:
+
+- see the active profile and detected game
+- toggle auto-switch
+- switch to another installed-game profile
+- make fast gamepad-button remaps for `L4`, `L5`, `R4`, `R5`, and `QAM`
+
+Current widget limitation:
+
+- Game Bar quick remaps currently edit only gamepad-button mappings. Choosing a value there will overwrite any key chord or macro on that paddle.
+
+## Feature set
+
+- Runs the Steam Controller as a virtual Xbox 360 controller through ViGEm
+- Automatically backs off when Steam is running so Steam Input can take over
+- Auto-switches profiles when a matching game launches, then returns to `Default` when that game closes
+- Supports Steam libraries, Xbox/Game Pass installs, broad game folders, and direct `.exe` sources
+- Persists profiles, library sources, and widget state between launches
+- Includes an Xbox Game Bar widget for live profile switching and quick remaps
+- Includes controller-friendly navigation in the desktop remapper and input capture dialogs
+- Starts from the tray and is safe to leave running
+
+## Install
+
+### Recommended release install
+
+1. Download the latest release.
+2. Install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest).
+3. Extract the `SteamControllerRemapperWidget-Sideload` bundle.
+4. Run `Install-SteamControllerRemapper.ps1` as administrator.
+5. Launch `Steam Controller Remapper`.
+6. Open Xbox Game Bar with `Win + G` and add the `Steam Controller Remapper` widget from the widgets menu.
+
+What that installer does:
+
+- installs the desktop app into `Program Files`
+- imports the widget certificate
+- installs the Game Bar widget and dependencies
+- creates a Start Menu shortcut
+
+### Desktop-only install
+
+If you do not want the widget, you can run `Steam Controller Remapper.exe` by itself after installing ViGEmBus.
+
+## Xbox Mode startup
+
+For reliable Xbox Mode startup, Windows Startup Apps should be set to **System startup** for `Steam Controller Remapper`, not **Desktop startup**.
+
+1. Open **Settings > Apps > Startup**.
+2. Find `Steam Controller Remapper`.
+3. Change its startup mode to **System startup**.
 
 ## Requirements
 
-### To run
-- Windows 10 or later (64-bit)
-- [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest) driver installed
-- Steam Controller (VID `0x28DE` / PID `0x1302`)
-- Steam may be running, but Steamless Mode will stay off until `steam.exe` exits
+- Windows 10 or later, 64-bit
+- [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest)
+- Steam Controller
+- Xbox Game Bar, if you want the widget
 
-## Xbox Mode Startup Setup
+## Build
 
-**Important:** after installing or launching the app for the first time, open Windows Startup Apps settings and switch `Steam Controller Remapper` to **System startup**. If it stays on **Desktop startup**, the app may work on the normal desktop but fail to start correctly in Xbox Mode.
-
-### Step by Step
-
-1. Open **Settings** in Windows.
-2. Go to **Apps**.
-3. Open **Startup**.
-4. Find **Steam Controller Remapper** in the startup app list.
-5. Open its startup options.
-6. Change the startup mode from **Desktop startup** to **System startup**.
-7. Reboot and test Xbox Mode again.
-
-If you do not see the app in the list yet, launch `Steam Controller Remapper` once, then return to **Settings > Apps > Startup** and change it there.
-
-### To build
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with the **Desktop development with C++** workload
-- [CMake](https://cmake.org/download/) 3.20 or later
-- Windows SDK 10.0.22000 or later
-
-## Building
-
-```bat
+```powershell
 git clone https://github.com/CommonMugger/Steam-Controller-Remapper.git
 cd Steam-Controller-Remapper
-cmake -B build
-cmake --build build --target SteamControllerRemapper
+cmake --preset release
+cmake --build --preset release
 ```
 
-The debug executable will be at `build\Debug\Steam Controller Remapper.exe`.
+Release output:
 
-For a release build:
+- `build\release\Release\Steam Controller Remapper.exe`
 
-```bat
-cmake -B build/release -G "Visual Studio 17 2022"
-cmake --build build/release --config Release --target SteamControllerRemapper
+To rebuild the Game Bar sideload bundle after the widget package exists:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\gamebar\SteamControllerRemapperWidget\BundleArtifacts\Build-SideloadBundle.ps1
 ```
-
-## CMake Targets
-
-| Target | Description |
-|---|---|
-| `SteamControllerRemapper` | Main system tray application |
-| `SteamProbe` | Console diagnostic tool that dumps raw HID report bytes while you interact with the controller |
-| `RawControllerProbe` | Checks whether `Windows.Gaming.Input.RawGameController` can enumerate the Steam Controller |
-
-## How It Works
-
-The Steam Controller exposes a vendor HID collection (usage page `0xFF00`) that carries all game input in a 54-byte report (ID `0x42`) at roughly 60 Hz. By default the firmware runs in **lizard mode**, emulating a keyboard and mouse so the controller works without drivers.
-
-Steam Controller Remapper sends HID feature reports to disable lizard mode, then reads the raw input reports and translates them into a virtual Xbox 360 controller via ViGEmBus. A background heartbeat re-sends the disable command every 800 ms to keep lizard mode off.
-
-The full input report layout is documented in [`src/steam/SteamController.h`](src/steam/SteamController.h).
-
-## Third-party
-
-- [ViGEmClient](https://github.com/nefarius/ViGEmClient) - MIT License, built from source as a static library
 
 ## Credits
 

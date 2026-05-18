@@ -50,6 +50,8 @@ endif()
 add_executable(SteamControllerRemapper WIN32
     src/app/main.cpp
     src/app/TrayApp.cpp
+    src/app/RemapBackend.cpp
+    src/app/RemapIpcServer.cpp
     src/app/ControllerManager.cpp
     src/app/VirtualController.cpp
     src/app/PaddleOverlay.cpp

@@ -260,3 +260,35 @@ std::wstring ControllerManager::GetCurrentMacroCaptureChord() const {
     if (b0 & SteamController::BTN_QAM) AppendChordToken(chord, L"QAM");
     return chord;
 }
+
+ControllerManager::UiNavigationState ControllerManager::GetUiNavigationState() const {
+    std::array<uint8_t, 64> buf{};
+    size_t n = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_lastReportMutex);
+        n = m_lastReportSize;
+        if (n == 0)
+            return {};
+        memcpy(buf.data(), m_lastReport.data(), n);
+    }
+
+    if (n < 18 || buf[0] != SteamController::REPORT_STATE)
+        return {};
+
+    const uint8_t b0 = buf[2];
+    const uint8_t b1 = buf[3];
+    const uint8_t b2 = buf[4];
+
+    UiNavigationState state;
+    state.confirm = (b0 & SteamController::BTN_A) != 0;
+    state.back = ((b0 & SteamController::BTN_B) != 0) || ((b1 & SteamController::BTN_VIEW) != 0);
+    state.clear = (b0 & SteamController::BTN_X) != 0;
+    state.record = (b0 & SteamController::BTN_Y) != 0;
+    state.previous = (b2 & SteamController::BTN_LB) != 0;
+    state.next = (b1 & SteamController::BTN_RB) != 0;
+    state.up = (b1 & SteamController::BTN_DPAD_UP) != 0;
+    state.right = (b1 & SteamController::BTN_DPAD_RT) != 0;
+    state.down = (b1 & SteamController::BTN_DPAD_DN) != 0;
+    state.left = (b1 & SteamController::BTN_DPAD_LT) != 0;
+    return state;
+}

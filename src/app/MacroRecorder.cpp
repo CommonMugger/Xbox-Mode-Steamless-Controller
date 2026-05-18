@@ -13,6 +13,10 @@ constexpr int IDC_HINT = 3003;
 constexpr int IDC_EDIT_STEP = 3004;
 constexpr int IDC_DELETE_STEP = 3005;
 constexpr int IDC_CLEAR_ALL = 3006;
+constexpr int IDC_CAPTURE = 3007;
+constexpr int IDC_SAVE = 3008;
+constexpr int IDC_CANCEL = 3009;
+constexpr int IDC_STATUS = 3010;
 constexpr UINT TIMER_CONTROLLER_POLL = 1;
 
 bool IsModifier(WPARAM vk) {
@@ -74,18 +78,30 @@ std::wstring JoinChord(const std::vector<UINT>& keys) {
 struct RecorderState {
     HWND hwnd = nullptr;
     HWND list = nullptr;
+    HWND status = nullptr;
+    HWND captureButton = nullptr;
+    HWND saveButton = nullptr;
+    HWND cancelButton = nullptr;
     bool accepted = false;
     std::set<UINT> held;
     std::vector<std::wstring> steps;
     std::wstring result;
     MacroRecorder::ControllerChordFn controllerChordFn;
+    MacroRecorder::ControllerUiStateFn controllerUiStateFn;
+    MacroRecorder::ControllerUiState lastControllerUiState{};
     std::wstring lastControllerChord;
     int appendIndex = -1;
+    bool captureArmed = false;
+    bool captureToSelected = false;
+    bool waitingForChordRelease = false;
+    int focusIndex = 0;
 };
 
 RecorderState* g_activeRecorder = nullptr;
 HHOOK g_keyboardHook = nullptr;
 HWND g_recorderWindow = nullptr;
+
+void ArmControllerCapture(RecorderState* state, bool appendToSelected);
 
 std::vector<std::wstring> SplitChordTokens(const std::wstring& text) {
     std::vector<std::wstring> tokens;
@@ -99,8 +115,9 @@ std::vector<std::wstring> SplitChordTokens(const std::wstring& text) {
 }
 
 void SetStatus(RecorderState* state, const std::wstring& text) {
-    (void)state;
-    (void)text;
+    if (!state || !state->status)
+        return;
+    SetWindowTextW(state->status, text.c_str());
 }
 
 std::wstring Trim(std::wstring value) {
@@ -115,12 +132,22 @@ std::wstring Trim(std::wstring value) {
 
 void RenderList(RecorderState* state) {
     SendMessageW(state->list, LB_RESETCONTENT, 0, 0);
+    HDC hdc = GetDC(state->list);
+    SIZE maxExtent{};
     for (size_t i = 0; i < state->steps.size(); ++i) {
         std::wstring item = state->steps[i];
         if (static_cast<int>(i) == state->appendIndex)
-            item = L"[Editing] " + item;
+            item = L"[Append] " + item;
         SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+        if (hdc) {
+            SIZE itemSize{};
+            if (GetTextExtentPoint32W(hdc, item.c_str(), static_cast<int>(item.size()), &itemSize) && itemSize.cx > maxExtent.cx)
+                maxExtent = itemSize;
+        }
     }
+    if (hdc)
+        ReleaseDC(state->list, hdc);
+    SendMessageW(state->list, LB_SETHORIZONTALEXTENT, maxExtent.cx + 24, 0);
 
     if (!state->steps.empty()) {
         const int selected = (state->appendIndex >= 0 && state->appendIndex < static_cast<int>(state->steps.size()))
@@ -218,19 +245,126 @@ void BeginEditSelectedStep(RecorderState* state) {
     if (index == LB_ERR || index >= static_cast<int>(state->steps.size()))
         return;
 
-    state->appendIndex = index;
-    state->held.clear();
-    RenderList(state);
-    SendMessageW(state->list, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
-    SetStatus(state, L"Append to selected step with next input...");
+    ArmControllerCapture(state, true);
 }
 
 void ClearAllSteps(RecorderState* state) {
     state->held.clear();
     state->appendIndex = -1;
+    state->captureArmed = false;
+    state->captureToSelected = false;
     state->steps.clear();
     RenderList(state);
-    SetStatus(state, L"Recording macro input");
+    SetStatus(state, L"No steps. Use Capture Step to add one.");
+}
+
+void RefreshRecorderFocus(RecorderState* state) {
+    if (!state || !state->hwnd)
+        return;
+    const HWND order[] = {
+        state->list,
+        state->captureButton,
+        GetDlgItem(state->hwnd, IDC_EDIT_STEP),
+        GetDlgItem(state->hwnd, IDC_DELETE_STEP),
+        GetDlgItem(state->hwnd, IDC_CLEAR_ALL),
+        state->saveButton,
+        state->cancelButton,
+    };
+    const int count = static_cast<int>(std::size(order));
+    if (state->focusIndex < 0)
+        state->focusIndex = 0;
+    if (state->focusIndex >= count)
+        state->focusIndex = count - 1;
+    HWND target = order[state->focusIndex];
+    if (target)
+        SetFocus(target);
+}
+
+bool FocusRecorderControl(RecorderState* state, HWND target) {
+    if (!state || !target)
+        return false;
+    const HWND order[] = {
+        state->list,
+        state->captureButton,
+        GetDlgItem(state->hwnd, IDC_EDIT_STEP),
+        GetDlgItem(state->hwnd, IDC_DELETE_STEP),
+        GetDlgItem(state->hwnd, IDC_CLEAR_ALL),
+        state->saveButton,
+        state->cancelButton,
+    };
+    for (int i = 0; i < static_cast<int>(std::size(order)); ++i) {
+        if (order[i] != target)
+            continue;
+        state->focusIndex = i;
+        RefreshRecorderFocus(state);
+        return true;
+    }
+    return false;
+}
+
+void MoveRecorderFocus(RecorderState* state, int delta) {
+    if (!state)
+        return;
+    const HWND order[] = {
+        state->list,
+        state->captureButton,
+        GetDlgItem(state->hwnd, IDC_EDIT_STEP),
+        GetDlgItem(state->hwnd, IDC_DELETE_STEP),
+        GetDlgItem(state->hwnd, IDC_CLEAR_ALL),
+        state->saveButton,
+        state->cancelButton,
+    };
+    const int count = static_cast<int>(std::size(order));
+    const HWND current = GetFocus();
+    for (int i = 0; i < count; ++i) {
+        if (order[i] == current) {
+            state->focusIndex = i;
+            break;
+        }
+    }
+    state->focusIndex += delta;
+    if (state->focusIndex < 0)
+        state->focusIndex = count - 1;
+    if (state->focusIndex >= count)
+        state->focusIndex = 0;
+    RefreshRecorderFocus(state);
+}
+
+void SelectListDelta(RecorderState* state, int delta) {
+    if (!state || state->steps.empty())
+        return;
+    int selected = static_cast<int>(SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+    if (selected == LB_ERR)
+        selected = 0;
+    selected += delta;
+    if (selected < 0)
+        selected = static_cast<int>(state->steps.size()) - 1;
+    if (selected >= static_cast<int>(state->steps.size()))
+        selected = 0;
+    SendMessageW(state->list, LB_SETCURSEL, selected, 0);
+    SetStatus(state, L"Selected: " + state->steps[selected]);
+}
+
+void ArmControllerCapture(RecorderState* state, bool appendToSelected) {
+    if (!state)
+        return;
+    state->captureArmed = true;
+    state->captureToSelected = appendToSelected;
+    state->waitingForChordRelease = true;
+    state->held.clear();
+    if (appendToSelected) {
+        const int index = static_cast<int>(SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+        if (index >= 0 && index < static_cast<int>(state->steps.size())) {
+            state->appendIndex = index;
+            RenderList(state);
+            SendMessageW(state->list, LB_SETCURSEL, index, 0);
+            SetStatus(state, L"Capture armed. Release buttons, then press the chord to append.");
+            return;
+        }
+    }
+    state->appendIndex = -1;
+    RenderList(state);
+    SetStatus(state, L"Capture armed. Release buttons, then press the chord to add a step.");
 }
 
 void BackspaceAction(RecorderState* state) {
@@ -318,22 +452,38 @@ LRESULT CALLBACK RecorderProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     switch (msg) {
     case WM_CREATE:
-        state->list = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY,
-                                    16, 16, 328, 200, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_LIST))), nullptr, nullptr);
-        CreateWindowW(L"BUTTON", L"Edit Step", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                      16, 228, 92, 26, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_EDIT_STEP))), nullptr, nullptr);
+        state->list = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL,
+                                    16, 16, 436, 196, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_LIST))), nullptr, nullptr);
+        state->captureButton = CreateWindowW(L"BUTTON", L"Capture Step", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                             16, 224, 132, 30, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CAPTURE))), nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Append Selected", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      160, 224, 132, 30, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_EDIT_STEP))), nullptr, nullptr);
         CreateWindowW(L"BUTTON", L"Delete Step", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                      116, 228, 92, 26, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_DELETE_STEP))), nullptr, nullptr);
+                      304, 224, 148, 30, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_DELETE_STEP))), nullptr, nullptr);
         CreateWindowW(L"BUTTON", L"Clear All", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                      216, 228, 92, 26, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CLEAR_ALL))), nullptr, nullptr);
+                      16, 262, 132, 30, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CLEAR_ALL))), nullptr, nullptr);
+        state->saveButton = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                          160, 262, 132, 30, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_SAVE))), nullptr, nullptr);
+        state->cancelButton = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                            304, 262, 148, 30, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CANCEL))), nullptr, nullptr);
+        state->status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                      16, 304, 436, 36, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_STATUS))), nullptr, nullptr);
         CreateWindowW(L"STATIC",
-                      L"Enter saves, Esc cancels. Double-click or Edit Step to append. Backspace trims the edited step or deletes the selected step.",
+                      L"D-pad moves. A activates. Capture Step records the next controller chord. Menu saves. View cancels.",
                       WS_CHILD | WS_VISIBLE,
-                      16, 262, 344, 34, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_HINT))), nullptr, nullptr);
+                      16, 344, 436, 36, hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_HINT))), nullptr, nullptr);
         RenderList(state);
+        SetStatus(state, state->steps.empty()
+            ? L"No steps. Use Capture Step to add one."
+            : L"Select a step or use Capture Step to add another.");
+        RefreshRecorderFocus(state);
         SetTimer(hwnd, TIMER_CONTROLLER_POLL, 30, nullptr);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wp) == IDC_CAPTURE && HIWORD(wp) == BN_CLICKED) {
+            ArmControllerCapture(state, false);
+            return 0;
+        }
         if (LOWORD(wp) == IDC_EDIT_STEP && HIWORD(wp) == BN_CLICKED) {
             BeginEditSelectedStep(state);
             return 0;
@@ -346,26 +496,108 @@ LRESULT CALLBACK RecorderProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ClearAllSteps(state);
             return 0;
         }
+        if (LOWORD(wp) == IDC_SAVE && HIWORD(wp) == BN_CLICKED) {
+            FinishRecorder(state, true);
+            return 0;
+        }
+        if (LOWORD(wp) == IDC_CANCEL && HIWORD(wp) == BN_CLICKED) {
+            FinishRecorder(state, false);
+            return 0;
+        }
         if (LOWORD(wp) == IDC_LIST && HIWORD(wp) == LBN_DBLCLK) {
             BeginEditSelectedStep(state);
             return 0;
         }
         break;
     case WM_TIMER:
-        if (wp == TIMER_CONTROLLER_POLL && state->controllerChordFn) {
-            const std::wstring chord = state->controllerChordFn();
-            if (!chord.empty() && state->lastControllerChord.empty()) {
-                if (IsControllerSaveChord(chord)) {
-                    FinishRecorder(state, true);
-                    return 0;
+        if (wp == TIMER_CONTROLLER_POLL) {
+            if (state->controllerUiStateFn) {
+                const auto current = state->controllerUiStateFn();
+                auto pressed = [&](bool ControllerManager::UiNavigationState::* member) {
+                    return (current.*member) && !(state->lastControllerUiState.*member);
+                };
+                if (!state->captureArmed) {
+                    const HWND focus = GetFocus();
+                    if (pressed(&ControllerManager::UiNavigationState::up)) {
+                        if (focus == state->captureButton || GetDlgItem(state->hwnd, IDC_EDIT_STEP) == focus ||
+                            GetDlgItem(state->hwnd, IDC_DELETE_STEP) == focus) {
+                            FocusRecorderControl(state, state->list);
+                        } else if (GetDlgItem(state->hwnd, IDC_CLEAR_ALL) == focus) {
+                            FocusRecorderControl(state, state->captureButton);
+                        } else if (state->saveButton == focus) {
+                            FocusRecorderControl(state, GetDlgItem(state->hwnd, IDC_EDIT_STEP));
+                        } else if (state->cancelButton == focus) {
+                            FocusRecorderControl(state, GetDlgItem(state->hwnd, IDC_DELETE_STEP));
+                        } else {
+                            MoveRecorderFocus(state, -1);
+                        }
+                    }
+                    if (pressed(&ControllerManager::UiNavigationState::down)) {
+                        if (focus == state->list) {
+                            FocusRecorderControl(state, state->captureButton);
+                        } else if (focus == state->captureButton) {
+                            FocusRecorderControl(state, GetDlgItem(state->hwnd, IDC_CLEAR_ALL));
+                        } else if (GetDlgItem(state->hwnd, IDC_EDIT_STEP) == focus) {
+                            FocusRecorderControl(state, state->saveButton);
+                        } else if (GetDlgItem(state->hwnd, IDC_DELETE_STEP) == focus) {
+                            FocusRecorderControl(state, state->cancelButton);
+                        } else {
+                            MoveRecorderFocus(state, 1);
+                        }
+                    }
+                    if (pressed(&ControllerManager::UiNavigationState::left)) {
+                        if (focus == state->list)
+                            SelectListDelta(state, -1);
+                        else
+                            MoveRecorderFocus(state, -1);
+                    }
+                    if (pressed(&ControllerManager::UiNavigationState::right)) {
+                        if (focus == state->list)
+                            SelectListDelta(state, 1);
+                        else
+                            MoveRecorderFocus(state, 1);
+                    }
+                    if (pressed(&ControllerManager::UiNavigationState::confirm)) {
+                        if (focus == state->list)
+                            BeginEditSelectedStep(state);
+                        else if (focus)
+                            SendMessageW(focus, BM_CLICK, 0, 0);
+                    }
                 }
-                if (IsControllerCancelChord(chord)) {
-                    FinishRecorder(state, false);
-                    return 0;
-                }
-                AddOrMergeStep(state, chord);
+                state->lastControllerUiState = current;
             }
-            state->lastControllerChord = chord;
+
+            if (state->controllerChordFn) {
+                const std::wstring chord = state->controllerChordFn();
+                if (state->captureArmed && state->waitingForChordRelease) {
+                    if (chord.empty()) {
+                        state->waitingForChordRelease = false;
+                        SetStatus(state, state->appendIndex >= 0
+                            ? L"Listening for append chord..."
+                            : L"Listening for new step chord...");
+                    }
+                } else if (!chord.empty() && state->lastControllerChord.empty()) {
+                    if (IsControllerSaveChord(chord)) {
+                        FinishRecorder(state, true);
+                        return 0;
+                    }
+                    if (IsControllerCancelChord(chord)) {
+                        FinishRecorder(state, false);
+                        return 0;
+                    }
+                    if (state->captureArmed) {
+                        AddOrMergeStep(state, chord);
+                        state->captureArmed = false;
+                        state->captureToSelected = false;
+                        state->waitingForChordRelease = false;
+                        state->appendIndex = -1;
+                        RenderList(state);
+                        SetStatus(state, L"Captured: " + chord + L". Use Capture Step for another.");
+                        RefreshRecorderFocus(state);
+                    }
+                }
+                state->lastControllerChord = chord;
+            }
         }
         return 0;
     case WM_CLOSE:
@@ -383,7 +615,8 @@ LRESULT CALLBACK RecorderProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 bool MacroRecorder::Record(HWND owner, std::wstring& macroText, const std::wstring& initialMacroText,
-                           ControllerChordFn controllerChordFn) {
+                           ControllerChordFn controllerChordFn,
+                           ControllerUiStateFn controllerUiStateFn) {
     if (g_recorderWindow && IsWindow(g_recorderWindow)) {
         ShowWindow(g_recorderWindow, SW_SHOWNORMAL);
         SetForegroundWindow(g_recorderWindow);
@@ -400,6 +633,12 @@ bool MacroRecorder::Record(HWND owner, std::wstring& macroText, const std::wstri
 
     RecorderState state{};
     state.controllerChordFn = std::move(controllerChordFn);
+    state.controllerUiStateFn = std::move(controllerUiStateFn);
+    state.focusIndex = 1;
+    if (state.controllerUiStateFn)
+        state.lastControllerUiState = state.controllerUiStateFn();
+    if (state.controllerChordFn)
+        state.lastControllerChord = state.controllerChordFn();
     {
         std::wstringstream stream(initialMacroText);
         std::wstring step;
@@ -412,18 +651,21 @@ bool MacroRecorder::Record(HWND owner, std::wstring& macroText, const std::wstri
     HWND hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         kClassName,
-        L"Record Macro",
+        L"Capture Input",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 392, 340,
+        CW_USEDEFAULT, CW_USEDEFAULT, 486, 430,
         owner, nullptr, wc.hInstance, &state);
     if (!hwnd)
         return false;
 
+    if (owner && IsWindow(owner))
+        EnableWindow(owner, FALSE);
     g_recorderWindow = hwnd;
     ShowWindow(hwnd, SW_SHOWNORMAL);
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
+    SetActiveWindow(hwnd);
+    RefreshRecorderFocus(&state);
     g_activeRecorder = &state;
     g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHookProc, GetModuleHandleW(nullptr), 0);
 
@@ -440,6 +682,11 @@ bool MacroRecorder::Record(HWND owner, std::wstring& macroText, const std::wstri
         g_keyboardHook = nullptr;
     }
     g_activeRecorder = nullptr;
+    if (owner && IsWindow(owner)) {
+        EnableWindow(owner, TRUE);
+        SetActiveWindow(owner);
+        SetForegroundWindow(owner);
+    }
 
     if (!state.accepted)
         return false;

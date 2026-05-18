@@ -1,6 +1,7 @@
 #include "PaddleConfigWindow.h"
 #include "MacroRecorder.h"
 #include "PaddleConfig.h"
+#include "logging/Log.h"
 #include "resource.h"
 #include <ShlObj.h>
 #include <commdlg.h>
@@ -19,16 +20,19 @@ constexpr int IDC_CLOSE = 2005;
 constexpr int IDC_SELECTED = 2006;
 constexpr int IDC_RAPID = 2008;
 constexpr int IDC_RECORD = 2009;
-constexpr int IDC_CLEAR = 2010;
 constexpr int IDC_PROFILE_CURRENT = 2011;
+constexpr int IDC_PADDLE_CURRENT = 2012;
 constexpr int IDC_LIBRARY_REFRESH = 2013;
 constexpr int IDC_GAME_LOCATION = 2014;
 constexpr int IDC_GAME_SOURCE_LIST = 2015;
 constexpr int IDC_GAME_SOURCE_EXE = 2016;
 constexpr int IDC_GAME_SOURCE_REMOVE = 2017;
 constexpr int IDC_AUTO_SWITCH = 2018;
+constexpr UINT_PTR UI_NAV_TIMER_ID = 1;
+constexpr UINT UI_NAV_TIMER_MS = 90;
 constexpr UINT_PTR TOOLTIP_BASE_ID = 5000;
 constexpr int kButtonCount = 5;
+constexpr int kDefaultControllerFocusIndex = 7;
 
 ULONG_PTR EnsureGdiplus() {
     static ULONG_PTR token = 0;
@@ -152,31 +156,20 @@ std::wstring GameSourceDisplayText(const std::wstring& spec) {
 }
 }
 
-PaddleConfigWindow::PaddleConfigWindow(LoadMappingsFn loadMappings,
-                                       LoadActionsFn loadActions,
+PaddleConfigWindow::PaddleConfigWindow(RemapBackend& backend,
                                        ControllerChordFn controllerChordFn,
-                                       LoadProfileIdFn loadProfileId,
-                                       ListInstalledGamesFn listInstalledGames,
-                                       RefreshInstalledGamesFn refreshInstalledGames,
-                                       LoadGameSourcesFn loadGameSources,
-                                       SaveGameSourcesFn saveGameSources,
+                                       ControllerUiStateFn controllerUiStateFn,
                                        LoadAutoSwitchFn loadAutoSwitch,
                                        SaveAutoSwitchFn saveAutoSwitch,
-                                       SelectProfileFn onSelectProfile,
-                                       DeleteProfileFn,
-                                       SaveFn onSave)
-    : m_loadMappings(std::move(loadMappings)),
-      m_loadActions(std::move(loadActions)),
+                                       ApplyProfileFn onApplyProfile)
+    : m_backend(backend),
       m_controllerChordFn(std::move(controllerChordFn)),
-      m_loadProfileId(std::move(loadProfileId)),
-      m_listInstalledGames(std::move(listInstalledGames)),
-      m_refreshInstalledGames(std::move(refreshInstalledGames)),
-      m_loadGameSources(std::move(loadGameSources)),
-      m_saveGameSources(std::move(saveGameSources)),
+      m_controllerUiStateFn(std::move(controllerUiStateFn)),
       m_loadAutoSwitch(std::move(loadAutoSwitch)),
       m_saveAutoSwitch(std::move(saveAutoSwitch)),
-      m_onSelectProfile(std::move(onSelectProfile)),
-      m_onSave(std::move(onSave)) {}
+      m_onApplyProfile(std::move(onApplyProfile)) {
+    m_controllerFocusIndex = kDefaultControllerFocusIndex;
+}
 
 void PaddleConfigWindow::Show(HINSTANCE hInstance, HWND owner) {
     m_owner = owner;
@@ -202,12 +195,19 @@ void PaddleConfigWindow::Show(HINSTANCE hInstance, HWND owner) {
         kClassName,
         L"Remap Buttons",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 920, 650,
+        CW_USEDEFAULT, CW_USEDEFAULT, 920, 780,
         owner, nullptr, hInstance, this);
 
     CreateControls();
     RefreshFromModel();
     ShowWindow(m_hwnd, SW_SHOWNORMAL);
+    SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(m_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(m_hwnd);
+    RefreshControllerFocus();
+    SetTimer(m_hwnd, UI_NAV_TIMER_ID, UI_NAV_TIMER_MS, nullptr);
     UpdateWindow(m_hwnd);
 }
 
@@ -245,12 +245,19 @@ LRESULT PaddleConfigWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         case IDC_RECORD:
             RecordMacro();
             return 0;
-        case IDC_CLEAR:
-            ClearSelection();
-            return 0;
         case IDC_PROFILE_CURRENT:
             if (HIWORD(wp) == CBN_SELCHANGE && !m_updatingControls)
                 UseSelectedGameProfile();
+            return 0;
+        case IDC_PADDLE_CURRENT:
+            if (HIWORD(wp) == CBN_SELCHANGE && !m_updatingControls) {
+                const int selectedIndex = static_cast<int>(SendMessageW(m_comboPaddleSelect, CB_GETCURSEL, 0, 0));
+                if (selectedIndex >= 0 && selectedIndex < kButtonCount) {
+                    m_selectedPaddle = selectedIndex;
+                    RefreshEditorForSelectedPaddle();
+                    InvalidateRect(hwnd, nullptr, TRUE);
+                }
+            }
             return 0;
         case IDC_LIBRARY_REFRESH:
             RefreshInstalledGames(true);
@@ -269,13 +276,13 @@ LRESULT PaddleConfigWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 SetModeSelectionForCurrent(static_cast<int>(SendMessageW(m_comboMode, CB_GETCURSEL, 0, 0)));
                 UpdateControlState();
-                if (!m_updatingControls && CurrentModeSelection() != 1 && CurrentModeSelection() != 2)
+                if (!m_updatingControls && CurrentModeSelection() != 1)
                     ApplySelection();
             }
             return 0;
         case IDC_GAMEPAD:
             if (HIWORD(wp) == CBN_SELCHANGE) {
-                InvalidateRect(hwnd, nullptr, TRUE);
+                InvalidatePreviewArea();
                 if (!m_updatingControls)
                     ApplySelection();
             }
@@ -293,6 +300,12 @@ LRESULT PaddleConfigWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         case IDC_BINDING:
             if (HIWORD(wp) == EN_KILLFOCUS && !m_updatingControls)
                 ApplySelection();
+            return 0;
+        }
+        break;
+    case WM_TIMER:
+        if (wp == UI_NAV_TIMER_ID) {
+            HandleControllerTimer();
             return 0;
         }
         break;
@@ -352,11 +365,15 @@ LRESULT PaddleConfigWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         return 0;
     }
     case WM_DESTROY:
+        KillTimer(hwnd, UI_NAV_TIMER_ID);
         if (m_hoverLabelPopup) {
             DestroyWindow(m_hoverLabelPopup);
             m_hoverLabelPopup = nullptr;
         }
         m_hwnd = nullptr;
+        return 0;
+    case WM_SETFOCUS:
+        RefreshControllerFocus();
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -405,41 +422,49 @@ void PaddleConfigWindow::CreateControls() {
                                       static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_AUTO_SWITCH))),
                                       m_hInstance, nullptr);
 
-    CreateWindowW(L"STATIC", L"Selected button:", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Button to edit:", WS_CHILD | WS_VISIBLE,
                   620, 282, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
+    m_comboPaddleSelect = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                        620, 304, 240, 200, m_hwnd,
+                                        static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_PADDLE_CURRENT))),
+                                        m_hInstance, nullptr);
+    for (int i = 0; i < kButtonCount; ++i)
+        SendMessageW(m_comboPaddleSelect, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(PaddleName(i)));
+    CreateWindowW(L"STATIC", L"Current binding:", WS_CHILD | WS_VISIBLE,
+                  620, 336, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
+    m_staticBindingSummary = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                           620, 356, 260, 28, m_hwnd, nullptr, m_hInstance, nullptr);
     m_staticSelected = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                                      740, 282, 150, 20, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_SELECTED))), m_hInstance, nullptr);
 
     CreateWindowW(L"STATIC", L"Action type:", WS_CHILD | WS_VISIBLE,
-                  620, 310, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
+                  620, 394, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
     m_comboMode = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                620, 332, 240, 220, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_MODE))), m_hInstance, nullptr);
+                                620, 416, 240, 220, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_MODE))), m_hInstance, nullptr);
     SendMessageW(m_comboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Gamepad button"));
-    SendMessageW(m_comboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Key chord / modifier"));
-    SendMessageW(m_comboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Macro"));
+    SendMessageW(m_comboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Shortcut / macro"));
     SendMessageW(m_comboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unmapped"));
 
     CreateWindowW(L"STATIC", L"Gamepad target:", WS_CHILD | WS_VISIBLE,
-                  620, 364, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
+                  620, 448, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
     m_comboGamepad = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                   620, 386, 240, 300, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_GAMEPAD))), m_hInstance, nullptr);
+                                   620, 470, 240, 300, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_GAMEPAD))), m_hInstance, nullptr);
     for (const PaddleMapping mapping : kGamepadOptions)
         SendMessageW(m_comboGamepad, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(GamepadName(mapping)));
 
     m_staticBinding = CreateWindowW(L"STATIC", L"Binding:", WS_CHILD | WS_VISIBLE,
-                                    620, 448, 120, 20, m_hwnd, nullptr, m_hInstance, nullptr);
+                                    620, 532, 160, 20, m_hwnd, nullptr, m_hInstance, nullptr);
     m_editBinding = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
-                                  620, 470, 240, 24, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_BINDING))), m_hInstance, nullptr);
+                                  620, 554, 240, 24, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_BINDING))), m_hInstance, nullptr);
+    m_staticBindingHelp = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                        620, 582, 240, 52, m_hwnd, nullptr, m_hInstance, nullptr);
 
     m_checkRapid = CreateWindowW(L"BUTTON", L"Rapid fire", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                 620, 418, 160, 22, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_RAPID))), m_hInstance, nullptr);
-    m_buttonRecord = CreateWindowW(L"BUTTON", L"Record Macro...", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                   620, 506, 120, 26, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_RECORD))), m_hInstance, nullptr);
-    m_buttonClear = CreateWindowW(L"BUTTON", L"Clear Bindings", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                  220, 414, 140, 30, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CLEAR))), m_hInstance, nullptr);
-
+                                 620, 502, 160, 22, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_RAPID))), m_hInstance, nullptr);
+    m_buttonRecord = CreateWindowW(L"BUTTON", L"Capture Input...", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                   620, 644, 240, 28, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_RECORD))), m_hInstance, nullptr);
     CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                  760, 506, 100, 30, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CLOSE))), m_hInstance, nullptr);
+                  620, 680, 240, 30, m_hwnd, static_cast<HMENU>(reinterpret_cast<void*>(static_cast<INT_PTR>(IDC_CLOSE))), m_hInstance, nullptr);
 
     m_hoverLabelPopup = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"STATIC", L"",
                                         WS_POPUP | WS_BORDER | SS_LEFT,
@@ -466,13 +491,14 @@ void PaddleConfigWindow::CreateControls() {
     ti.uId = TOOLTIP_BASE_ID;
     ti.lpszText = const_cast<wchar_t*>(L"");
     SendMessageW(m_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+
 }
 
 void PaddleConfigWindow::RefreshFromModel() {
-    m_mappings = m_loadMappings();
-    m_actions = m_loadActions();
-    m_editProfileId = m_loadProfileId ? m_loadProfileId() : L"default";
-    m_gameSourceSpecs = m_loadGameSources ? m_loadGameSources() : std::vector<std::wstring>{};
+    m_mappings = m_backend.GetActiveMappings();
+    m_actions = m_backend.GetActiveActions();
+    m_editProfileId = m_backend.GetActiveProfileId();
+    m_gameSourceSpecs = m_backend.GetGameSourceSpecs();
     m_autoSwitchProfiles = m_loadAutoSwitch ? m_loadAutoSwitch() : false;
     RefreshGameSourcesUi();
     RefreshInstalledGames();
@@ -484,24 +510,29 @@ void PaddleConfigWindow::RefreshFromModel() {
             m_modeSelections[i] = 0;
             break;
         case PaddleActionType::KeyChord:
+        case PaddleActionType::Macro:
             m_modeSelections[i] = 1;
             break;
-        case PaddleActionType::Macro:
-            m_modeSelections[i] = 2;
-            break;
         case PaddleActionType::None:
-            m_modeSelections[i] = 3;
+            m_modeSelections[i] = 2;
             break;
         }
     }
     RefreshProfileState();
+    RefreshBindingSummary();
     Button_SetCheck(m_checkAutoSwitch, m_autoSwitchProfiles ? BST_CHECKED : BST_UNCHECKED);
     RefreshEditorForSelectedPaddle();
-    InvalidateRect(m_hwnd, nullptr, TRUE);
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 void PaddleConfigWindow::RefreshProfileState() {
     SetWindowTextW(m_staticProfile, m_editProfileId == L"default" ? L"Default" : m_editProfileId.c_str());
+}
+
+void PaddleConfigWindow::RefreshBindingSummary() {
+    if (!m_staticBindingSummary)
+        return;
+    SetWindowTextW(m_staticBindingSummary, PaddleLabelText(m_selectedPaddle).c_str());
 }
 
 void PaddleConfigWindow::RefreshGameSourcesUi() {
@@ -544,8 +575,8 @@ void PaddleConfigWindow::RefreshInstalledGames(bool forceRefresh) {
     }
 
     m_installedGames = forceRefresh
-        ? (m_refreshInstalledGames ? m_refreshInstalledGames() : std::vector<std::wstring>{})
-        : (m_listInstalledGames ? m_listInstalledGames() : std::vector<std::wstring>{});
+        ? m_backend.RefreshInstalledGames()
+        : m_backend.GetInstalledGames();
     if (m_editProfileId != L"default") {
         const auto it = std::find_if(m_installedGames.begin(), m_installedGames.end(), [&](const std::wstring& game) {
             return PaddleConfig::NormalizeProfileId(game) == m_editProfileId;
@@ -606,6 +637,7 @@ void PaddleConfigWindow::RefreshEditorForSelectedPaddle() {
 
     m_updatingControls = true;
     SetWindowTextW(m_staticSelected, PaddleName(m_selectedPaddle));
+    SendMessageW(m_comboPaddleSelect, CB_SETCURSEL, m_selectedPaddle, 0);
     PaddleAction* action = SelectedAction();
     PaddleMapping* mapping = SelectedMapping();
 
@@ -629,25 +661,67 @@ void PaddleConfigWindow::RefreshEditorForSelectedPaddle() {
 
     SetWindowTextW(m_editBinding, ActionTextForEditor(*action, *mapping).c_str());
     Button_SetCheck(m_checkRapid, action->rapidFire ? BST_CHECKED : BST_UNCHECKED);
+    RefreshBindingSummary();
     UpdateControlState();
     m_updatingControls = false;
+}
+
+void PaddleConfigWindow::RefreshControllerFocus() {
+    HWND target = ControllerFocusHwnd();
+    if (target && IsWindowVisible(target) && IsWindowEnabled(target)) {
+        InvalidateFocusOutline(GetFocus());
+        SetFocus(target);
+        InvalidateFocusOutline(target);
+    }
+}
+
+void PaddleConfigWindow::InvalidateFocusOutline(HWND control) {
+    if (!m_hwnd || !control)
+        return;
+    RECT rect{};
+    if (!GetWindowRect(control, &rect))
+        return;
+    MapWindowPoints(HWND_DESKTOP, m_hwnd, reinterpret_cast<POINT*>(&rect), 2);
+    InflateRect(&rect, 8, 8);
+    InvalidateRect(m_hwnd, &rect, FALSE);
+}
+
+void PaddleConfigWindow::InvalidatePreviewArea() {
+    if (!m_hwnd)
+        return;
+
+    RECT previewRect{ 20, 32, 580, 411 };
+    InvalidateRect(m_hwnd, &previewRect, FALSE);
+
+    if (m_staticBindingSummary) {
+        RECT summaryRect{};
+        if (GetWindowRect(m_staticBindingSummary, &summaryRect)) {
+            MapWindowPoints(HWND_DESKTOP, m_hwnd, reinterpret_cast<POINT*>(&summaryRect), 2);
+            InvalidateRect(m_hwnd, &summaryRect, FALSE);
+        }
+    }
 }
 
 void PaddleConfigWindow::UpdateControlState() {
     const int modeIndex = CurrentModeSelection();
     const bool gamepadMode = (modeIndex == 0);
-    const bool noneMode = (modeIndex == 3);
-    const bool macroMode = (modeIndex == 2);
-    const bool keyMode = (modeIndex == 1);
+    const bool textMode = (modeIndex == 1);
+    const bool noneMode = (modeIndex == 2);
     EnableWindow(m_comboGamepad, gamepadMode);
-    EnableWindow(m_editBinding, keyMode);
-    ShowWindow(m_staticBinding, keyMode ? SW_SHOW : SW_HIDE);
-    ShowWindow(m_editBinding, keyMode ? SW_SHOW : SW_HIDE);
+    EnableWindow(m_editBinding, textMode);
+    SetWindowTextW(m_staticBinding, textMode ? L"Shortcut or macro:" : L"Binding:");
+    ShowWindow(m_staticBinding, textMode ? SW_SHOW : SW_HIDE);
+    ShowWindow(m_editBinding, textMode ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(m_staticBindingHelp,
+                   textMode
+                       ? L"Controller: use Capture Input...\r\nShortcut: CTRL+SHIFT+M\r\nMacro: WIN+TAB, ALT+ENTER"
+                       : L"");
+    ShowWindow(m_staticBindingHelp, textMode ? SW_SHOW : SW_HIDE);
     EnableWindow(m_checkRapid, !noneMode);
-    EnableWindow(m_buttonRecord, macroMode);
-    ShowWindow(m_buttonRecord, macroMode ? SW_SHOW : SW_HIDE);
-    ShowWindow(m_buttonClear, noneMode ? SW_HIDE : SW_SHOW);
+    EnableWindow(m_buttonRecord, textMode);
+    ShowWindow(m_buttonRecord, textMode ? SW_SHOW : SW_HIDE);
     RefreshProfileState();
+    RefreshControllerFocus();
 }
 
 int PaddleConfigWindow::CurrentModeSelection() const {
@@ -655,32 +729,552 @@ int PaddleConfigWindow::CurrentModeSelection() const {
 }
 
 void PaddleConfigWindow::SetModeSelectionForCurrent(int modeIndex) {
-    if (modeIndex < 0 || modeIndex > 3)
+    if (modeIndex < 0 || modeIndex > 2)
         modeIndex = 0;
     m_modeSelections[m_selectedPaddle] = modeIndex;
+}
+
+HWND PaddleConfigWindow::ControllerFocusHwnd() const {
+    const HWND order[] = {
+        m_comboGameProfiles,
+        m_buttonRefreshLibrary,
+        m_listGameSources,
+        m_buttonAddFolder,
+        m_buttonAddExe,
+        m_buttonRemoveSource,
+        m_checkAutoSwitch,
+        m_comboPaddleSelect,
+        m_comboMode,
+        m_editBinding,
+        m_comboGamepad,
+        m_checkRapid,
+        m_buttonRecord,
+        GetDlgItem(m_hwnd, IDC_CLOSE),
+    };
+    constexpr int closeIndex = static_cast<int>(std::size(order)) - 1;
+    int index = m_controllerFocusIndex;
+    if (index < 0)
+        index = 0;
+    if (index > closeIndex)
+        index = closeIndex;
+
+    HWND target = order[index];
+    if (!target)
+        return m_comboGameProfiles;
+    if (target == m_buttonRecord && !IsWindowVisible(m_buttonRecord))
+        return GetDlgItem(m_hwnd, IDC_CLOSE);
+    return target;
+}
+
+HWND PaddleConfigWindow::FocusedComboForController() const {
+    HWND target = ControllerFocusHwnd();
+    if (target == m_comboGameProfiles || target == m_comboPaddleSelect ||
+        target == m_comboMode || target == m_comboGamepad) {
+        return target;
+    }
+    return nullptr;
+}
+
+bool PaddleConfigWindow::IsControllerComboDropped(HWND combo) const {
+    return combo && SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) != 0;
+}
+
+void PaddleConfigWindow::ToggleControllerComboDropdown(HWND combo) {
+    if (!combo)
+        return;
+    const BOOL show = IsControllerComboDropped(combo) ? FALSE : TRUE;
+    SendMessageW(combo, CB_SHOWDROPDOWN, show, 0);
+}
+
+void PaddleConfigWindow::StepControllerComboSelection(HWND combo, int delta) {
+    if (!combo)
+        return;
+    const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    if (count <= 0)
+        return;
+    int selectedIndex = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+    if (selectedIndex < 0)
+        selectedIndex = 0;
+    const int oldIndex = selectedIndex;
+    selectedIndex += delta;
+    if (selectedIndex < 0)
+        selectedIndex = count - 1;
+    if (selectedIndex >= count)
+        selectedIndex = 0;
+    m_updatingControls = true;
+    SendMessageW(combo, CB_SETCURSEL, selectedIndex, 0);
+    m_updatingControls = false;
+    logging::Logf("[ControllerNav] Step combo id=%d old=%d new=%d dropped=%d",
+                  GetDlgCtrlID(combo), oldIndex, selectedIndex,
+                  IsControllerComboDropped(combo) ? 1 : 0);
+}
+
+void PaddleConfigWindow::CommitControllerComboSelection(HWND combo) {
+    if (!combo)
+        return;
+    logging::Logf("[ControllerNav] Commit combo id=%d selection=%d",
+                  GetDlgCtrlID(combo),
+                  static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0)));
+    if (combo == m_comboGameProfiles) {
+        UseSelectedGameProfile();
+    } else if (combo == m_comboPaddleSelect) {
+        const int selectedIndex = static_cast<int>(SendMessageW(m_comboPaddleSelect, CB_GETCURSEL, 0, 0));
+        if (selectedIndex >= 0 && selectedIndex < kButtonCount) {
+            m_selectedPaddle = selectedIndex;
+            logging::Logf("[ControllerNav] Selected paddle now=%d", m_selectedPaddle);
+            RefreshEditorForSelectedPaddle();
+            InvalidatePreviewArea();
+        }
+    } else if (combo == m_comboMode) {
+        SetModeSelectionForCurrent(static_cast<int>(SendMessageW(m_comboMode, CB_GETCURSEL, 0, 0)));
+        UpdateControlState();
+        if (CurrentModeSelection() != 1)
+            ApplySelection();
+    } else if (combo == m_comboGamepad) {
+        ApplySelection();
+    }
+}
+
+void ReselectComboAfterControllerCommit(HWND combo, int selection) {
+    if (!combo || selection < 0)
+        return;
+    SendMessageW(combo, CB_SETCURSEL, selection, 0);
+}
+
+void PaddleConfigWindow::MoveControllerFocus(int delta) {
+    HWND oldFocus = GetFocus();
+    if (!oldFocus || !IsChild(m_hwnd, oldFocus))
+        oldFocus = ControllerFocusHwnd();
+    const HWND order[] = {
+        m_comboGameProfiles,
+        m_buttonRefreshLibrary,
+        m_listGameSources,
+        m_buttonAddFolder,
+        m_buttonAddExe,
+        m_buttonRemoveSource,
+        m_checkAutoSwitch,
+        m_comboPaddleSelect,
+        m_comboMode,
+        m_editBinding,
+        m_comboGamepad,
+        m_checkRapid,
+        m_buttonRecord,
+        GetDlgItem(m_hwnd, IDC_CLOSE),
+    };
+    for (int i = 0; i < static_cast<int>(std::size(order)); ++i) {
+        if (order[i] == oldFocus) {
+            m_controllerFocusIndex = i;
+            break;
+        }
+    }
+    const int modeIndex = CurrentModeSelection();
+    const bool gamepadMode = modeIndex == 0;
+    const bool textMode = modeIndex == 1;
+    const bool noneMode = modeIndex == 2;
+    const HWND current = oldFocus;
+    const HWND closeButton = GetDlgItem(m_hwnd, IDC_CLOSE);
+    if (delta > 0) {
+        if (textMode && current == m_comboMode) {
+            FocusControllerControl(m_editBinding);
+            return;
+        }
+        if (textMode && current == m_editBinding) {
+            FocusControllerControl(m_checkRapid);
+            return;
+        }
+        if (textMode && current == m_checkRapid && IsWindowVisible(m_buttonRecord)) {
+            FocusControllerControl(m_buttonRecord);
+            return;
+        }
+        if (textMode && current == m_buttonRecord) {
+            FocusControllerControl(closeButton);
+            return;
+        }
+        if (gamepadMode && current == m_comboMode) {
+            FocusControllerControl(m_comboGamepad);
+            return;
+        }
+        if (gamepadMode && current == m_comboGamepad) {
+            FocusControllerControl(m_checkRapid);
+            return;
+        }
+        if (gamepadMode && current == m_checkRapid) {
+            FocusControllerControl(closeButton);
+            return;
+        }
+        if (noneMode && current == m_comboMode) {
+            FocusControllerControl(closeButton);
+            return;
+        }
+        if (current == closeButton)
+            return;
+    } else if (delta < 0) {
+        if (textMode && current == closeButton && IsWindowVisible(m_buttonRecord)) {
+            FocusControllerControl(m_buttonRecord);
+            return;
+        }
+        if (textMode && current == m_buttonRecord) {
+            FocusControllerControl(m_checkRapid);
+            return;
+        }
+        if (textMode && current == m_checkRapid) {
+            FocusControllerControl(m_editBinding);
+            return;
+        }
+        if (textMode && current == m_editBinding) {
+            FocusControllerControl(m_comboMode);
+            return;
+        }
+        if (textMode && current == m_comboMode) {
+            FocusControllerControl(m_comboPaddleSelect);
+            return;
+        }
+        if (gamepadMode && current == closeButton) {
+            FocusControllerControl(m_checkRapid);
+            return;
+        }
+        if (gamepadMode && current == m_checkRapid) {
+            FocusControllerControl(m_comboGamepad);
+            return;
+        }
+        if (gamepadMode && current == m_comboGamepad) {
+            FocusControllerControl(m_comboMode);
+            return;
+        }
+        if (gamepadMode && current == m_comboMode) {
+            FocusControllerControl(m_comboPaddleSelect);
+            return;
+        }
+        if (noneMode && current == closeButton) {
+            FocusControllerControl(m_comboMode);
+            return;
+        }
+        if (noneMode && current == m_comboMode) {
+            FocusControllerControl(m_comboPaddleSelect);
+            return;
+        }
+    }
+
+    constexpr int focusCount = static_cast<int>(std::size(order));
+    for (int i = 0; i < focusCount; ++i) {
+        m_controllerFocusIndex += delta;
+        if (m_controllerFocusIndex < 0)
+            m_controllerFocusIndex = focusCount - 1;
+        if (m_controllerFocusIndex >= focusCount)
+            m_controllerFocusIndex = 0;
+
+        HWND target = ControllerFocusHwnd();
+        if (target && IsWindowVisible(target) && IsWindowEnabled(target)) {
+            InvalidateFocusOutline(oldFocus);
+            SetFocus(target);
+            InvalidateFocusOutline(target);
+            return;
+        }
+    }
+}
+
+bool PaddleConfigWindow::FocusControllerControl(HWND target) {
+    if (!target)
+        return false;
+
+    const HWND previous = GetFocus();
+
+    const HWND order[] = {
+        m_comboGameProfiles,
+        m_buttonRefreshLibrary,
+        m_listGameSources,
+        m_buttonAddFolder,
+        m_buttonAddExe,
+        m_buttonRemoveSource,
+        m_checkAutoSwitch,
+        m_comboPaddleSelect,
+        m_comboMode,
+        m_editBinding,
+        m_comboGamepad,
+        m_checkRapid,
+        m_buttonRecord,
+        GetDlgItem(m_hwnd, IDC_CLOSE),
+    };
+
+    for (int i = 0; i < static_cast<int>(std::size(order)); ++i) {
+        if (order[i] != target)
+            continue;
+        m_controllerFocusIndex = i;
+        logging::Logf("[ControllerNav] Focus direct from=%d to=%d",
+                      previous ? GetDlgCtrlID(previous) : 0,
+                      GetDlgCtrlID(target));
+        RefreshControllerFocus();
+        return true;
+    }
+    return false;
+}
+
+void PaddleConfigWindow::CycleCurrentProfile(int delta) {
+    if (m_installedGames.empty())
+        return;
+    int selectedIndex = static_cast<int>(SendMessageW(m_comboGameProfiles, CB_GETCURSEL, 0, 0));
+    if (selectedIndex < 0)
+        selectedIndex = 0;
+    selectedIndex += delta;
+    if (selectedIndex < 0)
+        selectedIndex = static_cast<int>(m_installedGames.size()) - 1;
+    if (selectedIndex >= static_cast<int>(m_installedGames.size()))
+        selectedIndex = 0;
+    SendMessageW(m_comboGameProfiles, CB_SETCURSEL, selectedIndex, 0);
+    UseSelectedGameProfile();
+}
+
+void PaddleConfigWindow::CycleCurrentPaddle(int delta) {
+    m_selectedPaddle += delta;
+    if (m_selectedPaddle < 0)
+        m_selectedPaddle = kButtonCount - 1;
+    if (m_selectedPaddle >= kButtonCount)
+        m_selectedPaddle = 0;
+    RefreshEditorForSelectedPaddle();
+    InvalidatePreviewArea();
+}
+
+void PaddleConfigWindow::CycleCurrentMode(int delta) {
+    int modeIndex = CurrentModeSelection() + delta;
+    if (modeIndex < 0)
+        modeIndex = 2;
+    if (modeIndex > 2)
+        modeIndex = 0;
+    SetModeSelectionForCurrent(modeIndex);
+    SendMessageW(m_comboMode, CB_SETCURSEL, modeIndex, 0);
+    UpdateControlState();
+    if (modeIndex != 1)
+        ApplySelection();
+}
+
+void PaddleConfigWindow::CycleCurrentGamepad(int delta) {
+    int selectedIndex = static_cast<int>(SendMessageW(m_comboGamepad, CB_GETCURSEL, 0, 0));
+    if (selectedIndex < 0)
+        selectedIndex = 0;
+    const int optionCount = static_cast<int>(std::size(kGamepadOptions));
+    selectedIndex += delta;
+    if (selectedIndex < 0)
+        selectedIndex = optionCount - 1;
+    if (selectedIndex >= optionCount)
+        selectedIndex = 0;
+    SendMessageW(m_comboGamepad, CB_SETCURSEL, selectedIndex, 0);
+    ApplySelection();
+}
+
+void PaddleConfigWindow::CycleGameSourceSelection(int delta) {
+    if (m_gameSourceSpecs.empty())
+        return;
+    int selected = static_cast<int>(SendMessageW(m_listGameSources, LB_GETCURSEL, 0, 0));
+    if (selected < 0)
+        selected = 0;
+    selected += delta;
+    if (selected < 0)
+        selected = static_cast<int>(m_gameSourceSpecs.size()) - 1;
+    if (selected >= static_cast<int>(m_gameSourceSpecs.size()))
+        selected = 0;
+    SendMessageW(m_listGameSources, LB_SETCURSEL, selected, 0);
+}
+
+void PaddleConfigWindow::ToggleAutoSwitch() {
+    const bool enabled = Button_GetCheck(m_checkAutoSwitch) != BST_CHECKED;
+    Button_SetCheck(m_checkAutoSwitch, enabled ? BST_CHECKED : BST_UNCHECKED);
+    m_autoSwitchProfiles = enabled;
+    if (m_saveAutoSwitch)
+        m_saveAutoSwitch(enabled);
+}
+
+void PaddleConfigWindow::ActivateFocusedControl() {
+    HWND target = ControllerFocusHwnd();
+    if (!target)
+        return;
+
+    if (target == m_comboGameProfiles) {
+        ToggleControllerComboDropdown(target);
+        return;
+    }
+    if (target == m_listGameSources) {
+        return;
+    }
+    if (target == m_checkAutoSwitch) {
+        ToggleAutoSwitch();
+        return;
+    }
+    if (target == m_comboPaddleSelect) {
+        ToggleControllerComboDropdown(target);
+        return;
+    }
+    if (target == m_comboMode) {
+        ToggleControllerComboDropdown(target);
+        return;
+    }
+    if (target == m_editBinding) {
+        if (CurrentModeSelection() == 1) {
+            RecordMacro();
+            return;
+        }
+        SetFocus(target);
+        SendMessageW(target, EM_SETSEL, 0, -1);
+        return;
+    }
+    if (target == m_comboGamepad) {
+        ToggleControllerComboDropdown(target);
+        return;
+    }
+    if (target == m_checkRapid) {
+        Button_SetCheck(m_checkRapid,
+                        Button_GetCheck(m_checkRapid) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED);
+        ApplySelection();
+        return;
+    }
+
+    SendMessageW(target, BM_CLICK, 0, 0);
+}
+
+void PaddleConfigWindow::HandleControllerTimer() {
+    if (!m_controllerUiStateFn || !m_hwnd || !IsWindowVisible(m_hwnd) || IsIconic(m_hwnd) || !IsWindowEnabled(m_hwnd))
+        return;
+
+    const ControllerUiState current = m_controllerUiStateFn();
+    auto pressed = [&](bool ControllerUiState::* member) {
+        return (current.*member) && !(m_lastControllerUiState.*member);
+    };
+    auto focusedTarget = [&]() -> HWND {
+        HWND focus = GetFocus();
+        if (focus && IsChild(m_hwnd, focus))
+            return focus;
+        return ControllerFocusHwnd();
+    };
+    const HWND focused = focusedTarget();
+    HWND combo = nullptr;
+    if (focused == m_comboGameProfiles || focused == m_comboPaddleSelect ||
+        focused == m_comboMode || focused == m_comboGamepad) {
+        combo = focused;
+    }
+    const bool comboDropped = IsControllerComboDropped(combo);
+
+    if (pressed(&ControllerUiState::back)) {
+        logging::Logf("[ControllerNav] Back pressed comboDropped=%d focusId=%d",
+                      comboDropped ? 1 : 0,
+                      focused ? GetDlgCtrlID(focused) : 0);
+        if (comboDropped) {
+            SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+            m_lastControllerUiState = current;
+            return;
+        }
+        CommitPendingChanges();
+        DestroyWindow(m_hwnd);
+        m_lastControllerUiState = current;
+        return;
+    }
+    if (pressed(&ControllerUiState::previous))
+        CycleCurrentPaddle(-1);
+    if (pressed(&ControllerUiState::next))
+        CycleCurrentPaddle(1);
+    if (pressed(&ControllerUiState::up)) {
+        if (comboDropped)
+            StepControllerComboSelection(combo, -1);
+        else {
+            const HWND target = focusedTarget();
+            const int modeIndex = CurrentModeSelection();
+            if (modeIndex == 1 && target == GetDlgItem(m_hwnd, IDC_CLOSE) && IsWindowVisible(m_buttonRecord))
+                FocusControllerControl(m_buttonRecord);
+            else if (modeIndex == 0 && target == GetDlgItem(m_hwnd, IDC_CLOSE))
+                FocusControllerControl(m_checkRapid);
+            else if (modeIndex == 2 && target == GetDlgItem(m_hwnd, IDC_CLOSE))
+                FocusControllerControl(m_comboMode);
+            else
+                MoveControllerFocus(-1);
+        }
+    }
+    if (pressed(&ControllerUiState::down)) {
+        if (comboDropped)
+            StepControllerComboSelection(combo, 1);
+        else {
+            const HWND target = focusedTarget();
+            const int modeIndex = CurrentModeSelection();
+            if (modeIndex == 1 && target == m_buttonRecord)
+                FocusControllerControl(GetDlgItem(m_hwnd, IDC_CLOSE));
+            else if ((modeIndex == 1 || modeIndex == 0 || modeIndex == 2) && target == GetDlgItem(m_hwnd, IDC_CLOSE))
+                return;
+            else
+                MoveControllerFocus(1);
+        }
+    }
+    if (pressed(&ControllerUiState::left)) {
+        HWND target = focusedTarget();
+        if (comboDropped) {
+            StepControllerComboSelection(combo, -1);
+            CommitControllerComboSelection(combo);
+        } else if (target == m_comboGameProfiles)
+            CycleCurrentProfile(-1);
+        else if (target == m_listGameSources)
+            CycleGameSourceSelection(-1);
+        else if (target == m_checkAutoSwitch)
+            ToggleAutoSwitch();
+        else if (target == m_comboPaddleSelect)
+            CycleCurrentPaddle(-1);
+        else if (target == m_comboMode)
+            CycleCurrentMode(-1);
+        else if (target == m_comboGamepad)
+            CycleCurrentGamepad(-1);
+        else if (target == m_checkRapid) {
+            Button_SetCheck(m_checkRapid, BST_UNCHECKED);
+            ApplySelection();
+        }
+    }
+    if (pressed(&ControllerUiState::right)) {
+        HWND target = focusedTarget();
+        if (comboDropped) {
+            StepControllerComboSelection(combo, 1);
+            CommitControllerComboSelection(combo);
+        } else if (target == m_comboGameProfiles)
+            CycleCurrentProfile(1);
+        else if (target == m_listGameSources)
+            CycleGameSourceSelection(1);
+        else if (target == m_checkAutoSwitch)
+            ToggleAutoSwitch();
+        else if (target == m_comboPaddleSelect)
+            CycleCurrentPaddle(1);
+        else if (target == m_comboMode)
+            CycleCurrentMode(1);
+        else if (target == m_comboGamepad)
+            CycleCurrentGamepad(1);
+        else if (target == m_checkRapid) {
+            Button_SetCheck(m_checkRapid, BST_CHECKED);
+            ApplySelection();
+        }
+    }
+    if (pressed(&ControllerUiState::confirm)) {
+        logging::Logf("[ControllerNav] Confirm pressed comboDropped=%d focusId=%d",
+                      comboDropped ? 1 : 0,
+                      focusedTarget() ? GetDlgCtrlID(focusedTarget()) : 0);
+        if (comboDropped) {
+            const int committedSelection = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            CommitControllerComboSelection(combo);
+            SendMessageW(combo, CB_SHOWDROPDOWN, FALSE, 0);
+            m_updatingControls = true;
+            ReselectComboAfterControllerCommit(combo, committedSelection);
+            m_updatingControls = false;
+        } else {
+            ActivateFocusedControl();
+        }
+    }
+    if (pressed(&ControllerUiState::record) && IsWindowVisible(m_buttonRecord))
+        RecordMacro();
+
+    m_lastControllerUiState = current;
 }
 
 void PaddleConfigWindow::RecordMacro() {
     wchar_t buffer[512] = {};
     GetWindowTextW(m_editBinding, buffer, static_cast<int>(std::size(buffer)));
     std::wstring macroText;
-    if (!MacroRecorder::Record(m_hwnd, macroText, buffer, m_controllerChordFn))
+    if (!MacroRecorder::Record(m_hwnd, macroText, buffer, m_controllerChordFn, m_controllerUiStateFn))
         return;
 
     SetWindowTextW(m_editBinding, macroText.c_str());
-    SetModeSelectionForCurrent(2);
+    SetModeSelectionForCurrent(1);
     ApplySelection();
-}
-
-void PaddleConfigWindow::ClearSelection() {
-    PaddleAction* action = SelectedAction();
-    PaddleMapping* mapping = SelectedMapping();
-    *mapping = PaddleMapping::None;
-    *action = PaddleAction{PaddleActionType::None};
-    SetModeSelectionForCurrent(3);
-    PersistCurrentState();
-    RefreshEditorForSelectedPaddle();
-    InvalidateRect(m_hwnd, nullptr, TRUE);
 }
 
 void PaddleConfigWindow::CommitPendingChanges() {
@@ -690,16 +1284,18 @@ void PaddleConfigWindow::CommitPendingChanges() {
 }
 
 void PaddleConfigWindow::PersistCurrentState() {
-    m_onSave(m_mappings, m_actions);
+    m_backend.SaveActiveProfile(m_mappings, m_actions);
+    if (m_onApplyProfile)
+        m_onApplyProfile(m_backend.GetActiveProfileId(), true);
 }
 
 void PaddleConfigWindow::UseSelectedGameProfile() {
-    if (!m_onSelectProfile)
-        return;
     const int selectedIndex = static_cast<int>(SendMessageW(m_comboGameProfiles, CB_GETCURSEL, 0, 0));
     if (selectedIndex < 0 || selectedIndex >= static_cast<int>(m_installedGames.size()))
         return;
-    m_onSelectProfile(m_installedGames[selectedIndex]);
+    m_backend.SetActiveProfileId(m_installedGames[selectedIndex], true);
+    if (m_onApplyProfile)
+        m_onApplyProfile(m_backend.GetActiveProfileId(), true);
     RefreshFromModel();
 }
 
@@ -714,9 +1310,9 @@ void PaddleConfigWindow::AddGameFolderSource() {
         return;
 
     wchar_t path[MAX_PATH] = {};
-    if (SHGetPathFromIDListW(pidl, path) && m_saveGameSources) {
+    if (SHGetPathFromIDListW(pidl, path)) {
         m_gameSourceSpecs.push_back(L"DIR|" + std::wstring(path));
-        m_saveGameSources(m_gameSourceSpecs);
+        m_backend.SetGameSourceSpecs(m_gameSourceSpecs);
         RefreshGameSourcesUi();
         RefreshInstalledGames(true);
         RefreshProfileState();
@@ -733,9 +1329,9 @@ void PaddleConfigWindow::AddGameExeSource() {
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameW(&ofn) && m_saveGameSources) {
+    if (GetOpenFileNameW(&ofn)) {
         m_gameSourceSpecs.push_back(L"EXE|" + std::wstring(path));
-        m_saveGameSources(m_gameSourceSpecs);
+        m_backend.SetGameSourceSpecs(m_gameSourceSpecs);
         RefreshGameSourcesUi();
         RefreshInstalledGames(true);
         RefreshProfileState();
@@ -744,10 +1340,10 @@ void PaddleConfigWindow::AddGameExeSource() {
 
 void PaddleConfigWindow::RemoveSelectedGameSource() {
     const int selected = static_cast<int>(SendMessageW(m_listGameSources, LB_GETCURSEL, 0, 0));
-    if (selected < 0 || selected >= static_cast<int>(m_gameSourceSpecs.size()) || !m_saveGameSources)
+    if (selected < 0 || selected >= static_cast<int>(m_gameSourceSpecs.size()))
         return;
     m_gameSourceSpecs.erase(m_gameSourceSpecs.begin() + selected);
-    m_saveGameSources(m_gameSourceSpecs);
+    m_backend.SetGameSourceSpecs(m_gameSourceSpecs);
     RefreshGameSourcesUi();
     RefreshInstalledGames(true);
     RefreshProfileState();
@@ -768,22 +1364,27 @@ void PaddleConfigWindow::ApplySelection() {
         action->gamepadMapping = selected;
         action->chord.clear();
         action->macroSteps.clear();
-    } else if (modeIndex == 1 || modeIndex == 2) {
+    } else if (modeIndex == 1) {
         wchar_t buffer[512] = {};
         GetWindowTextW(m_editBinding, buffer, static_cast<int>(std::size(buffer)));
         std::wstring raw = buffer;
         if (raw.empty()) {
-            RefreshEditorForSelectedPaddle();
-            InvalidateRect(m_hwnd, nullptr, TRUE);
+            logging::Logf("[ControllerNav] Deferred mode save id=%d mode=%d emptyBinding=1",
+                          m_selectedPaddle, modeIndex);
+            RefreshBindingSummary();
+            InvalidatePreviewArea();
             return;
         }
-        std::wstring prefixed = (modeIndex == 1 ? L"key:" : L"macro:") + raw;
+        const bool isMacro = raw.find(L',') != std::wstring::npos;
+        std::wstring prefixed = (isMacro ? L"macro:" : L"key:") + raw;
         PaddleAction parsed{};
         if (PaddleConfig::ParseActionString(prefixed, parsed)) {
             *action = std::move(parsed);
         } else {
-            RefreshEditorForSelectedPaddle();
-            InvalidateRect(m_hwnd, nullptr, TRUE);
+            logging::Logf("[ControllerNav] Deferred mode save id=%d mode=%d invalidBinding=1 raw=%s",
+                          m_selectedPaddle, modeIndex, logging::Narrow(raw).c_str());
+            RefreshBindingSummary();
+            InvalidatePreviewArea();
             return;
         }
     } else {
@@ -796,7 +1397,8 @@ void PaddleConfigWindow::ApplySelection() {
     }
 
     PersistCurrentState();
-    InvalidateRect(m_hwnd, nullptr, TRUE);
+    RefreshBindingSummary();
+    InvalidatePreviewArea();
 }
 
 RECT PaddleConfigWindow::PaddleRect(int paddleIndex) const {
@@ -901,5 +1503,20 @@ void PaddleConfigWindow::Paint(HDC hdc) {
         RECT textRect = rect;
         textRect.left += 6;
         DrawTextW(hdc, label.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    if (HWND focused = ControllerFocusHwnd()) {
+        RECT focusRect{};
+        if (GetWindowRect(focused, &focusRect)) {
+            MapWindowPoints(HWND_DESKTOP, m_hwnd, reinterpret_cast<POINT*>(&focusRect), 2);
+            InflateRect(&focusRect, 4, 4);
+            HPEN focusPen = CreatePen(PS_SOLID, 3, RGB(0, 120, 212));
+            HGDIOBJ oldPen = SelectObject(hdc, focusPen);
+            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            RoundRect(hdc, focusRect.left, focusRect.top, focusRect.right, focusRect.bottom, 12, 12);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(focusPen);
+        }
     }
 }

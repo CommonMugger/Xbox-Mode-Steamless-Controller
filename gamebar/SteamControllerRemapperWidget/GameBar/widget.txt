@@ -1,0 +1,1 @@
+Steam Controller Remapper widget package public folder.
