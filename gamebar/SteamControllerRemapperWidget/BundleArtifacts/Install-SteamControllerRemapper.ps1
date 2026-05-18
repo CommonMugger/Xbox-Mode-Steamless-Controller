@@ -78,6 +78,24 @@ function Enable-Startup([string]$InstalledExePath) {
     Write-InstallerLog 'Enabled Start with Windows for the current user.'
 }
 
+function Import-BundleCertificate([string]$CertificateFile) {
+    if (-not (Test-Path $CertificateFile)) {
+        throw "Expected certificate file '$CertificateFile' was not found."
+    }
+
+    $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CertificateFile)
+    $existing = Get-ChildItem -Path Cert:\CurrentUser\TrustedPeople -ErrorAction SilentlyContinue |
+        Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
+        Select-Object -First 1
+    if ($existing) {
+        Write-InstallerLog "Widget certificate already trusted: $($certificate.Thumbprint)"
+        return
+    }
+
+    Import-Certificate -FilePath $CertificateFile -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople' | Out-Null
+    Write-InstallerLog "Imported widget certificate to CurrentUser\\TrustedPeople: $($certificate.Thumbprint)"
+}
+
 function Assert-WidgetInstalled([string]$PackageName) {
     $package = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $package) {
@@ -127,6 +145,7 @@ if (-not (Test-Path $widgetPackageRoot)) {
 
 $desktopExe = Get-SingleFile -Root $desktopRoot -Pattern '*.exe' -Description 'desktop executable'
 $widgetInstallerScript = Join-Path $widgetPackageRoot 'Add-AppDevPackage.ps1'
+$certificateFile = Join-Path $widgetPackageRoot 'SteamControllerRemapperWidget.cer'
 if (-not (Test-Path $widgetInstallerScript)) {
     throw "Expected widget installer script '$widgetInstallerScript' was not found."
 }

@@ -66,19 +66,19 @@ function Get-SignToolPath {
 
 function Ensure-SignedMsix([string]$MsixPath, [string]$Thumbprint) {
     $signtool = Get-SignToolPath
-    & $signtool verify /pa $MsixPath *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $verify = Start-Process -FilePath $signtool -ArgumentList "verify /pa `"$MsixPath`"" -Wait -PassThru -NoNewWindow
+    if ($verify.ExitCode -eq 0) {
         return
     }
 
     Write-Host "Signing widget package $MsixPath"
-    & $signtool sign /fd SHA256 /sha1 $Thumbprint /s My $MsixPath
-    if ($LASTEXITCODE -ne 0) {
+    $sign = Start-Process -FilePath $signtool -ArgumentList "sign /fd SHA256 /sha1 $Thumbprint /s My `"$MsixPath`"" -Wait -PassThru -NoNewWindow
+    if ($sign.ExitCode -ne 0) {
         throw "Failed to sign widget package $MsixPath"
     }
 
-    & $signtool verify /pa $MsixPath *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $verify = Start-Process -FilePath $signtool -ArgumentList "verify /pa `"$MsixPath`"" -Wait -PassThru -NoNewWindow
+    if ($verify.ExitCode -ne 0) {
         throw "Widget package signature verification failed for $MsixPath"
     }
 }
