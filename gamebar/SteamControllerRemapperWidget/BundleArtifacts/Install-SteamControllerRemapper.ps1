@@ -46,8 +46,8 @@ function Get-SingleFile([string]$Root, [string]$Pattern, [string]$Description) {
 
 function Test-UsbIpDriverPresent {
     $services = @(
-        Get-Service -Name 'usbip_vhci' -ErrorAction SilentlyContinue,
-        Get-Service -Name 'usbip2_vhci' -ErrorAction SilentlyContinue
+        (Get-Service -Name 'usbip_vhci' -ErrorAction SilentlyContinue),
+        (Get-Service -Name 'usbip2_vhci' -ErrorAction SilentlyContinue)
     ) | Where-Object { $_ }
     if ($services) {
         return $true
