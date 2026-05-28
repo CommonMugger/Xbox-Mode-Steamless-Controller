@@ -57,7 +57,7 @@ static void RunCalibration(SteamController& ctrl) {
     int collected = 0;
     while (collected < CALIB_FRAMES) {
         size_t n = ctrl.ReadReport(buf, sizeof(buf), 200);
-        if (n == 0 || buf[0] != SteamController::REPORT_STATE)
+        if (n == 0 || !SteamController::UsesLegacyStateLayout(buf, n))
             continue;
         if (s_reportLen == 0) s_reportLen = n;
         for (size_t i = 1; i < n; ++i)
@@ -196,7 +196,7 @@ int main() {
         if (n == 0) continue;
 
         uint8_t reportId = buf[0];
-        if (reportId == SteamController::REPORT_STATE) {
+        if (SteamController::UsesLegacyStateLayout(buf, n)) {
             PrintState42Diff(buf, n);
         } else {
             printf("[0x%02X %zu bytes] ", reportId, n);

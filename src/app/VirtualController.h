@@ -1,4 +1,5 @@
 #pragma once
+#include "StandardGamepadState.h"
 #include <cstdint>
 #include <cstddef>
 #include <functional>
@@ -78,19 +79,24 @@ public:
     void SetPaddleMappings(PaddleMappings mappings) { m_paddleMappings = mappings; }
     void SetPaddleActions(PaddleActionBindings actions) { m_paddleActions = std::move(actions); }
 
-    void Update(const uint8_t* buf, size_t n);
+    void Update(const uint8_t* buf, size_t n, const StandardGamepadState* standardState = nullptr);
 
 private:
-    static void ViGEmNotification(void* client, void* target, uint8_t largeMotor, uint8_t smallMotor, uint8_t ledNumber);
-    static void ViGEmDs4Notification(void* client, void* target, uint8_t largeMotor, uint8_t smallMotor, uint32_t lightbarColor);
+    static void ViiperXboxRumbleCallback(std::uintptr_t handle, uint8_t leftMotor, uint8_t rightMotor);
+    static void ViiperDs4OutputCallback(std::uintptr_t handle, uint8_t rumbleSmall, uint8_t rumbleLarge,
+                                        uint8_t ledRed, uint8_t ledGreen, uint8_t ledBlue,
+                                        uint8_t flashOn, uint8_t flashOff);
 
-    void* m_client       = nullptr;
-    void* m_target       = nullptr;
+    void* m_module       = nullptr;
+    std::uintptr_t m_serverHandle = 0;
+    std::uintptr_t m_deviceHandle = 0;
+    uint32_t m_busId = 0;
     bool  m_valid        = false;
     bool  m_driverMissing = false;
     EmulationMode m_mode = EmulationMode::Xbox360;
     PaddleMappings m_paddleMappings{};
     PaddleActionBindings m_paddleActions{};
-    bool m_prevPaddlePressed[4] = {false, false, false, false};
+    bool m_prevPaddlePressed[5] = {false, false, false, false, false};
+    bool m_loggedSdlState = false;
     RumbleCallback m_onRumble;
 };

@@ -64,32 +64,72 @@ function Get-SignToolPath {
     return $tool.FullName
 }
 
-function Ensure-SignedMsix([string]$MsixPath, [string]$Thumbprint) {
+function Ensure-SignedFile([string]$FilePath, [string]$Thumbprint) {
     $signtool = Get-SignToolPath
-    $verify = Start-Process -FilePath $signtool -ArgumentList "verify /pa `"$MsixPath`"" -Wait -PassThru -NoNewWindow
+    $verify = Start-Process -FilePath $signtool -ArgumentList "verify /pa `"$FilePath`"" -Wait -PassThru -NoNewWindow
     if ($verify.ExitCode -eq 0) {
         return
     }
 
-    Write-Host "Signing widget package $MsixPath"
-    $sign = Start-Process -FilePath $signtool -ArgumentList "sign /fd SHA256 /sha1 $Thumbprint /s My `"$MsixPath`"" -Wait -PassThru -NoNewWindow
+    Write-Host "Signing file $FilePath"
+    $sign = Start-Process -FilePath $signtool -ArgumentList "sign /fd SHA256 /sha1 $Thumbprint /s My `"$FilePath`"" -Wait -PassThru -NoNewWindow
     if ($sign.ExitCode -ne 0) {
-        throw "Failed to sign widget package $MsixPath"
+        throw "Failed to sign file $FilePath"
     }
 
-    $verify = Start-Process -FilePath $signtool -ArgumentList "verify /pa `"$MsixPath`"" -Wait -PassThru -NoNewWindow
+    $verify = Start-Process -FilePath $signtool -ArgumentList "verify /pa `"$FilePath`"" -Wait -PassThru -NoNewWindow
     if ($verify.ExitCode -ne 0) {
-        throw "Widget package signature verification failed for $MsixPath"
+        throw "File signature verification failed for $FilePath"
     }
 }
 
-function Find-DesktopExe {
+function Find-DesktopOutput {
     $repoRoot = Resolve-Path (Join-Path $scriptRoot '..\..\..')
-    $desktopExePath = Join-Path $repoRoot 'build\release\Release\Steam Controller Remapper.exe'
+    $desktopOutputPath = Join-Path $repoRoot 'build\release\Release'
+    $desktopExePath = Join-Path $desktopOutputPath 'Steam Controller Remapper.exe'
+    $viiperDllPath = Join-Path $desktopOutputPath 'libVIIPER.dll'
     if (-not (Test-Path $desktopExePath)) {
         throw "Desktop executable not found at $desktopExePath. Build the Release target first."
     }
-    return Get-Item -LiteralPath $desktopExePath
+    if (-not (Test-Path $viiperDllPath)) {
+        throw "libVIIPER.dll not found at $viiperDllPath. Build the Release target first."
+    }
+    return Get-Item -LiteralPath $desktopOutputPath
+}
+
+function Copy-DesktopRuntime([string]$SourceRoot, [string]$DestinationRoot) {
+    $runtimeFiles = @(
+        'Steam Controller Remapper.exe',
+        'libVIIPER.dll'
+    )
+
+    foreach ($name in $runtimeFiles) {
+        $sourcePath = Join-Path $SourceRoot $name
+        if (-not (Test-Path $sourcePath)) {
+            throw "Required desktop runtime file was not found: $sourcePath"
+        }
+
+        Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $DestinationRoot $name) -Force
+    }
+}
+
+function Assert-DesktopRuntimeLayout([string]$DesktopRoot) {
+    $expected = @(
+        'Steam Controller Remapper.exe',
+        'libVIIPER.dll'
+    )
+    $actual = Get-ChildItem -LiteralPath $DesktopRoot -File | Select-Object -ExpandProperty Name
+
+    $unexpected = $actual | Where-Object { $_ -notin $expected }
+    if ($unexpected) {
+        throw "Desktop bundle contains unexpected files: $($unexpected -join ', ')"
+    }
+
+    foreach ($name in $expected) {
+        if ($name -notin $actual) {
+            throw "Desktop bundle is missing required runtime file: $name"
+        }
+    }
 }
 
 $scriptRoot = Split-Path -Parent $PSCommandPath
@@ -101,7 +141,7 @@ if ([string]::IsNullOrWhiteSpace($ZipPath)) {
 }
 
 $packageFolder = Find-PackageFolder
-$desktopExe = Find-DesktopExe
+$desktopOutput = Find-DesktopOutput
 if (-not (Test-Path (Join-Path $packageFolder.FullName 'Add-AppDevPackage.ps1'))) {
     throw "Add-AppDevPackage.ps1 was not found in $($packageFolder.FullName)"
 }
@@ -109,7 +149,7 @@ $widgetPackage = Get-ChildItem -Path $packageFolder.FullName -Filter *.msix -Fil
 if (-not $widgetPackage) {
     throw "No .msix package found in $($packageFolder.FullName)"
 }
-Ensure-SignedMsix -MsixPath $widgetPackage.FullName -Thumbprint $CertificateThumbprint
+Ensure-SignedFile -FilePath $widgetPackage.FullName -Thumbprint $CertificateThumbprint
 
 if (Test-Path $OutputFolder) {
     Remove-Item -LiteralPath $OutputFolder -Recurse -Force
@@ -119,10 +159,12 @@ New-Item -ItemType Directory -Path (Join-Path $OutputFolder 'Desktop') | Out-Nul
 New-Item -ItemType Directory -Path (Join-Path $OutputFolder 'WidgetPackage') | Out-Null
 
 Copy-Item -Path (Join-Path $packageFolder.FullName '*') -Destination (Join-Path $OutputFolder 'WidgetPackage') -Recurse
-Copy-Item -LiteralPath $desktopExe.FullName -Destination (Join-Path $OutputFolder 'Desktop\Steam Controller Remapper.exe')
+Copy-DesktopRuntime -SourceRoot $desktopOutput.FullName -DestinationRoot (Join-Path $OutputFolder 'Desktop')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.cmd') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.cmd')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.ps1') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.ps1')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $OutputFolder 'README.md')
+Ensure-SignedFile -FilePath (Join-Path $OutputFolder 'Desktop\Steam Controller Remapper.exe') -Thumbprint $CertificateThumbprint
+Assert-DesktopRuntimeLayout -DesktopRoot (Join-Path $OutputFolder 'Desktop')
 
 $certificatePath = Join-Path $OutputFolder 'SteamControllerRemapperWidget.cer'
 Export-PublicCertificate -Thumbprint $CertificateThumbprint -DestinationPath $certificatePath

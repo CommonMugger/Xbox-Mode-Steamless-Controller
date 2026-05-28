@@ -24,8 +24,8 @@ private:
 
     void AddTrayIcon();
     void RemoveTrayIcon();
-    void UpdateTrayIcon(bool connected, bool gameModeActive, bool vigemMissing = false);
-    void ShowViGEmBalloon();
+    void UpdateTrayIcon(bool connected, bool gameModeActive, bool outputBackendMissing = false);
+    void ShowOutputBackendBalloon();
     void ShowContextMenu();
     void LoadSettings();
     void SaveSettings();
@@ -42,6 +42,9 @@ private:
     void ReconcileAutoMode();
     bool IsStartupEnabled() const;
     void SetStartupEnabled(bool enabled);
+    void CheckForUpdates(bool userInitiated);
+    void CheckControllerReportSignature();
+    void ShowFirmwareChangedBalloon(const std::wstring& signature);
 
     HWND                               m_hwnd      = nullptr;
     HINSTANCE                          m_hInstance = nullptr;
@@ -55,9 +58,11 @@ private:
     bool                               m_autoSwitchProfiles      = false;
     bool                               m_manualProfileOverride   = false;
     bool                               m_steamRunning            = false;
+    bool                               m_reportSignatureChecked  = false;
     ULONGLONG                          m_lastReconnectAttemptTick = 0;
     std::string                        m_lastWidgetStateJson;
     std::string                        m_lastWidgetRequestId;
+    std::wstring                       m_savedControllerReportSignature;
     RemapBackend                       m_remapBackend;
 
     static constexpr UINT IDM_TOGGLE        = 1001;
@@ -69,6 +74,7 @@ private:
     static constexpr UINT IDM_AUTOENABLE    = 1007;
     static constexpr UINT IDM_OUTPUT_X360   = 1008;
     static constexpr UINT IDM_OUTPUT_DS4    = 1009;
+    static constexpr UINT IDM_CHECK_UPDATES  = 1010;
     static constexpr UINT IDM_CONFIGURE_PADDLES   = 1400;
     static constexpr UINT WM_TRAY          = WM_APP + 1;
     static constexpr UINT TRAY_UID         = 1;

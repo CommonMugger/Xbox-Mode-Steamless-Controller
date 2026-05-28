@@ -4,10 +4,18 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
 
 class SteamController {
 public:
+    enum class InputReportKind {
+        None = 0,
+        LegacyState,
+        CompatibleState,
+        NonState,
+    };
+
     static constexpr uint16_t VALVE_VID        = 0x28DE;
     static constexpr uint16_t SC2026_PID       = 0x1302;  // wired USB
     static constexpr uint16_t SC2026_DONGLE_PID = 0x1304; // wireless dongle ("Steam Controller Puck")
@@ -36,12 +44,18 @@ public:
     static constexpr uint8_t CMD_SET_DEFAULT_MAPPINGS   = 0x85;  // ← lizard on
     static constexpr uint8_t CMD_SET_SETTINGS           = 0x87;
     static constexpr uint8_t CMD_GET_SETTINGS           = 0x89;
+    static constexpr uint8_t CMD_LOAD_DEFAULT_SETTINGS  = 0x8E;
     static constexpr uint8_t CMD_HAPTIC_FEEDBACK        = 0x8F;
 
     // Setting key IDs (go in the payload of CMD_SET_SETTINGS)
     static constexpr uint8_t SETTING_RIGHT_TRACKPAD_MODE = 0x07;
     static constexpr uint8_t SETTING_LEFT_TRACKPAD_MODE  = 0x08;
-    static constexpr uint8_t TRACKPAD_NONE               = 0x00;
+    static constexpr uint8_t SETTING_MOMENTUM_DECAY_AMOUNT = 0x0C;
+    static constexpr uint8_t SETTING_MOMENTUM_MAXIMUM_VELOCITY = 0x12;
+    static constexpr uint8_t SETTING_SMOOTH_ABSOLUTE_MOUSE = 0x18;
+    static constexpr uint8_t SETTING_WIRELESS_PACKET_VERSION = 0x31;
+    static constexpr uint8_t TRACKPAD_ABSOLUTE_MOUSE      = 0x00;
+    static constexpr uint8_t TRACKPAD_NONE               = 0x07;
 
     // ---------------------------------------------------------------------------
     // Input report layout — 0x42 STATE report (buf[0] = 0x42)
@@ -133,13 +147,26 @@ public:
     // Returns 0 on timeout.
     size_t ReadReport(uint8_t* buffer, size_t size, uint32_t timeoutMs = 16);
 
+    static InputReportKind ClassifyInputReport(const uint8_t* buffer, size_t size);
+    static bool IsStateLikeReport(const uint8_t* buffer, size_t size) {
+        InputReportKind kind = ClassifyInputReport(buffer, size);
+        return kind == InputReportKind::LegacyState || kind == InputReportKind::CompatibleState;
+    }
+    static bool UsesLegacyStateLayout(const uint8_t* buffer, size_t size) {
+        return buffer && size >= 30 && IsStateLikeReport(buffer, size);
+    }
+    std::wstring GetLastReportSignature() const { return m_lastReportSignature; }
+
     // Approximate XInput rumble using the controller's left/right haptics.
     void SetRumble(uint8_t largeMotor, uint8_t smallMotor);
+    void PulseHaptic(uint8_t strength = 64);
+    void SetDesktopTrackpadMouseMode(bool enabled, bool useLeftTrackpad);
 
 private:
     void HeartbeatLoop();
     void RumbleLoop();
     bool SendHapticCommand(uint8_t position, uint16_t amplitude, uint16_t period, uint16_t count);
+    bool ApplyTrackpadMouseSettings();
 
     HidDevice          m_device;
     std::thread        m_heartbeat;
@@ -151,4 +178,7 @@ private:
     bool              m_rumbleStop = false;
     uint8_t           m_largeMotor = 0;
     uint8_t           m_smallMotor = 0;
+    bool              m_trackpadMouseEnabled = true;
+    bool              m_useLeftTrackpadMouse = false;
+    std::wstring      m_lastReportSignature;
 };

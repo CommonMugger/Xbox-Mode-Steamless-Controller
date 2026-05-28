@@ -11,9 +11,47 @@ void AppendChordToken(std::wstring& text, const wchar_t* token) {
         text += L"+";
     text += token;
 }
+
+void AppendStandardChordTokens(std::wstring& chord, const StandardGamepadState& state) {
+    if (state.a) AppendChordToken(chord, L"A");
+    if (state.b) AppendChordToken(chord, L"B");
+    if (state.x) AppendChordToken(chord, L"X");
+    if (state.y) AppendChordToken(chord, L"Y");
+    if (state.leftShoulder) AppendChordToken(chord, L"LB");
+    if (state.rightShoulder) AppendChordToken(chord, L"RB");
+    if (state.leftTrigger > 16) AppendChordToken(chord, L"LT");
+    if (state.rightTrigger > 16) AppendChordToken(chord, L"RT");
+    if (state.start) AppendChordToken(chord, L"MENU");
+    if (state.back) AppendChordToken(chord, L"VIEW");
+    if (state.guide) AppendChordToken(chord, L"GUIDE");
+    if (state.leftStick) AppendChordToken(chord, L"L3");
+    if (state.rightStick) AppendChordToken(chord, L"R3");
+    if (state.dpadUp) AppendChordToken(chord, L"DPADUP");
+    if (state.dpadRight) AppendChordToken(chord, L"DPADRIGHT");
+    if (state.dpadDown) AppendChordToken(chord, L"DPADDOWN");
+    if (state.dpadLeft) AppendChordToken(chord, L"DPADLEFT");
+}
+
+void SendKeyboardKeyUp(WORD vk) {
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &input, sizeof(INPUT));
+}
+
+void ReleasePotentialShellKeys() {
+    SendKeyboardKeyUp(VK_LWIN);
+    SendKeyboardKeyUp(VK_RWIN);
+    SendKeyboardKeyUp(VK_TAB);
+}
 }
 
 static std::unique_ptr<SteamController> g_ctrl;
+
+namespace {
+constexpr bool kEnableFirmwareTrackpadMouse = false;
+}
 
 ControllerManager::ControllerManager(StateChangedFn onStateChanged)
     : m_onStateChanged(std::move(onStateChanged))
@@ -27,10 +65,25 @@ ControllerManager::~ControllerManager() {
 }
 
 void ControllerManager::OnDeviceChange() {
-    logging::Logf("[ControllerManager] OnDeviceChange connected=%d gameMode=%d",
-                  m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
-    if (!m_connected)
+    const std::uint64_t now = GetTickCount64();
+    const bool shouldLog =
+        m_connected != m_lastDeviceChangeLogConnected ||
+        m_gameModeActive != m_lastDeviceChangeLogGameMode ||
+        now - m_lastDeviceChangeLogTickMs >= 5000;
+    if (shouldLog) {
+        logging::Logf("[ControllerManager] OnDeviceChange connected=%d gameMode=%d",
+                      m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
+        m_lastDeviceChangeLogTickMs = now;
+        m_lastDeviceChangeLogConnected = m_connected;
+        m_lastDeviceChangeLogGameMode = m_gameModeActive;
+    }
+
+    if (!m_connected) {
+        m_outputBackendMissing = false;
+        ReleasePotentialShellKeys();
+        logging::Logf("[ControllerManager] Released potential native shell keys on device-change while disconnected");
         TryOpen();
+    }
     else if (g_ctrl && !g_ctrl->IsOpen())
         Close(/*restoreLizard=*/false);
 }
@@ -43,6 +96,7 @@ void ControllerManager::OnSuspend() {
 
 void ControllerManager::OnResume() {
     logging::Logf("[ControllerManager] OnResume");
+    m_outputBackendMissing = false;
     Close(/*restoreLizard=*/false);
     TryOpen();
 }
@@ -51,6 +105,10 @@ void ControllerManager::EnableGameMode() {
     logging::Logf("[ControllerManager] EnableGameMode connected=%d active=%d",
                   m_connected ? 1 : 0, m_gameModeActive ? 1 : 0);
     if (!m_connected || m_gameModeActive) return;
+    m_outputBackendMissing = false;
+    g_ctrl->SetDesktopTrackpadMouseMode(
+        kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled,
+        m_useLeftTrackpad);
     if (!g_ctrl->DisableLizardMode()) {
         logging::Logf("[ControllerManager] EnableGameMode failed at DisableLizardMode");
         return;
@@ -67,19 +125,24 @@ void ControllerManager::EnableGameMode() {
         });
     if (!m_virtual->IsValid()) {
         bool missing = m_virtual->IsDriverMissing();
+        m_outputBackendMissing = missing;
         logging::Logf("[ControllerManager] EnableGameMode failed at VirtualController valid=0 missing=%d",
                       missing ? 1 : 0);
         m_virtual.reset();
         g_ctrl->EnableLizardMode();
-        if (missing) m_onStateChanged(m_connected, m_gameModeActive, /*vigemMissing=*/true);
+        if (missing) m_onStateChanged(m_connected, m_gameModeActive, /*outputBackendMissing=*/true);
         return;
     }
 
     m_gameModeActive = true;
+    ReleasePotentialShellKeys();
+    logging::Logf("[ControllerManager] Released potential native shell keys after lizard-mode transition");
     m_trackpad.Reset();
     m_trackpad.SetTrackpadEnabled(m_trackpadMouseEnabled);
     m_trackpad.SetBackButtonsEnabled(m_backButtonsEnabled);
     m_trackpad.SetUseLeftTrackpad(m_useLeftTrackpad);
+    m_trackpad.SetHapticCallback([this]() { PulseTrackpadClickHaptics(); });
+    m_trackpad.SetFirmwareMouseEnabled(kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled);
     m_paddleOverlay.SetBindings(m_paddleActions);
     StartReadLoop();
     logging::Logf("[ControllerManager] EnableGameMode success");
@@ -101,6 +164,9 @@ void ControllerManager::DisableGameMode() {
 void ControllerManager::SetTrackpadMouseEnabled(bool enabled) {
     m_trackpadMouseEnabled = enabled;
     m_trackpad.SetTrackpadEnabled(enabled);
+    m_trackpad.SetFirmwareMouseEnabled(kEnableFirmwareTrackpadMouse && enabled);
+    if (g_ctrl)
+        g_ctrl->SetDesktopTrackpadMouseMode(kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled, m_useLeftTrackpad);
 }
 
 void ControllerManager::SetBackButtonsEnabled(bool enabled) {
@@ -111,6 +177,8 @@ void ControllerManager::SetBackButtonsEnabled(bool enabled) {
 void ControllerManager::SetUseLeftTrackpad(bool enabled) {
     m_useLeftTrackpad = enabled;
     m_trackpad.SetUseLeftTrackpad(enabled);
+    if (g_ctrl)
+        g_ctrl->SetDesktopTrackpadMouseMode(kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled, m_useLeftTrackpad);
 }
 
 void ControllerManager::SetEmulationMode(EmulationMode mode) {
@@ -164,6 +232,7 @@ void ControllerManager::TryOpen() {
     if (!g_ctrl) g_ctrl = std::make_unique<SteamController>();
     if (g_ctrl->Open()) {
         m_connected = true;
+        m_outputBackendMissing = false;
         logging::Logf("[ControllerManager] TryOpen success");
         m_onStateChanged(m_connected, m_gameModeActive, false);
     } else {
@@ -175,6 +244,7 @@ void ControllerManager::Close(bool restoreLizard) {
     StopReadLoop();
     m_virtual.reset();
     m_paddleOverlay.Reset();
+    m_trackpad.SetHapticCallback({});
     if (g_ctrl) {
         if (restoreLizard && m_gameModeActive)
             g_ctrl->EnableLizardMode();
@@ -182,6 +252,7 @@ void ControllerManager::Close(bool restoreLizard) {
     }
     m_connected      = false;
     m_gameModeActive = false;
+    m_outputBackendMissing = false;
     m_onStateChanged(m_connected, m_gameModeActive, false);
 }
 
@@ -201,16 +272,38 @@ void ControllerManager::ReadLoop() {
     while (m_readRunning) {
         size_t n = g_ctrl->ReadReport(buf, sizeof(buf), /*timeoutMs=*/32);
         if (n == 0) continue;
-        if (buf[0] != SteamController::REPORT_STATE) continue;
+        if (!SteamController::IsStateLikeReport(buf, n)) continue;
+        StandardGamepadState standardState;
+        m_sdlInput.Poll(standardState);
         {
             std::lock_guard<std::mutex> lock(m_lastReportMutex);
             m_lastReportSize = (std::min)(n, m_lastReport.size());
             memcpy(m_lastReport.data(), buf, m_lastReportSize);
         }
-        if (m_virtual) m_virtual->Update(buf, n);
-        m_paddleOverlay.Update(buf, n);
-        m_trackpad.Update(buf, n);
+        {
+            std::lock_guard<std::mutex> lock(m_standardStateMutex);
+            m_lastStandardState = standardState;
+        }
+        if (m_virtual) m_virtual->Update(buf, n, &standardState);
+        m_paddleOverlay.Update(buf, n, &standardState);
+        m_trackpad.Update(buf, n, &standardState);
     }
+}
+
+void ControllerManager::PulseTrackpadClickHaptics() {
+    if (!g_ctrl || !m_gameModeActive)
+        return;
+    const std::uint64_t now = GetTickCount64();
+    const std::uint64_t last = m_lastTrackpadHapticPulseTickMs.load();
+    if (now - last < 40)
+        return;
+    m_lastTrackpadHapticPulseTickMs = now;
+    g_ctrl->PulseHaptic(/*strength=*/64);
+}
+
+StandardGamepadState ControllerManager::GetLatestStandardState() const {
+    std::lock_guard<std::mutex> lock(m_standardStateMutex);
+    return m_lastStandardState;
 }
 
 std::wstring ControllerManager::GetCurrentMacroCaptureChord() const {
@@ -224,35 +317,43 @@ std::wstring ControllerManager::GetCurrentMacroCaptureChord() const {
         memcpy(buf.data(), m_lastReport.data(), n);
     }
 
-    if (n < 18 || buf[0] != SteamController::REPORT_STATE)
+    if (n < 18 || !SteamController::UsesLegacyStateLayout(buf.data(), n))
         return {};
 
+    std::wstring chord;
+    const StandardGamepadState standard = GetLatestStandardState();
+    if (standard.connected) {
+        AppendStandardChordTokens(chord, standard);
+    } else {
+        const uint8_t b0 = buf[2];
+        const uint8_t b1 = buf[3];
+        const uint8_t b2 = buf[4];
+        int16_t ltRaw = 0;
+        int16_t rtRaw = 0;
+        memcpy(&ltRaw, buf.data() + 6, 2);
+        memcpy(&rtRaw, buf.data() + 8, 2);
+
+        if (b0 & SteamController::BTN_A) AppendChordToken(chord, L"A");
+        if (b0 & SteamController::BTN_B) AppendChordToken(chord, L"B");
+        if (b0 & SteamController::BTN_X) AppendChordToken(chord, L"X");
+        if (b0 & SteamController::BTN_Y) AppendChordToken(chord, L"Y");
+        if (b2 & SteamController::BTN_LB) AppendChordToken(chord, L"LB");
+        if (b1 & SteamController::BTN_RB) AppendChordToken(chord, L"RB");
+        if (ltRaw > 2048) AppendChordToken(chord, L"LT");
+        if (rtRaw > 2048) AppendChordToken(chord, L"RT");
+        if (b0 & SteamController::BTN_MENU) AppendChordToken(chord, L"MENU");
+        if (b1 & SteamController::BTN_VIEW) AppendChordToken(chord, L"VIEW");
+        if (b2 & SteamController::BTN_STEAM) AppendChordToken(chord, L"GUIDE");
+        if (b1 & SteamController::BTN_LS) AppendChordToken(chord, L"L3");
+        if (b0 & SteamController::BTN_RS) AppendChordToken(chord, L"R3");
+        if (b1 & SteamController::BTN_DPAD_UP) AppendChordToken(chord, L"DPADUP");
+        if (b1 & SteamController::BTN_DPAD_RT) AppendChordToken(chord, L"DPADRIGHT");
+        if (b1 & SteamController::BTN_DPAD_DN) AppendChordToken(chord, L"DPADDOWN");
+        if (b1 & SteamController::BTN_DPAD_LT) AppendChordToken(chord, L"DPADLEFT");
+    }
     const uint8_t b0 = buf[2];
     const uint8_t b1 = buf[3];
     const uint8_t b2 = buf[4];
-    int16_t ltRaw = 0;
-    int16_t rtRaw = 0;
-    memcpy(&ltRaw, buf.data() + 6, 2);
-    memcpy(&rtRaw, buf.data() + 8, 2);
-
-    std::wstring chord;
-    if (b0 & SteamController::BTN_A) AppendChordToken(chord, L"A");
-    if (b0 & SteamController::BTN_B) AppendChordToken(chord, L"B");
-    if (b0 & SteamController::BTN_X) AppendChordToken(chord, L"X");
-    if (b0 & SteamController::BTN_Y) AppendChordToken(chord, L"Y");
-    if (b2 & SteamController::BTN_LB) AppendChordToken(chord, L"LB");
-    if (b1 & SteamController::BTN_RB) AppendChordToken(chord, L"RB");
-    if (ltRaw > 2048) AppendChordToken(chord, L"LT");
-    if (rtRaw > 2048) AppendChordToken(chord, L"RT");
-    if (b0 & SteamController::BTN_MENU) AppendChordToken(chord, L"MENU");
-    if (b1 & SteamController::BTN_VIEW) AppendChordToken(chord, L"VIEW");
-    if (b2 & SteamController::BTN_STEAM) AppendChordToken(chord, L"GUIDE");
-    if (b1 & SteamController::BTN_LS) AppendChordToken(chord, L"L3");
-    if (b0 & SteamController::BTN_RS) AppendChordToken(chord, L"R3");
-    if (b1 & SteamController::BTN_DPAD_UP) AppendChordToken(chord, L"DPADUP");
-    if (b1 & SteamController::BTN_DPAD_RT) AppendChordToken(chord, L"DPADRIGHT");
-    if (b1 & SteamController::BTN_DPAD_DN) AppendChordToken(chord, L"DPADDOWN");
-    if (b1 & SteamController::BTN_DPAD_LT) AppendChordToken(chord, L"DPADLEFT");
     if (b2 & SteamController::BTN_L4) AppendChordToken(chord, L"L4");
     if (b2 & SteamController::BTN_L5) AppendChordToken(chord, L"L5");
     if (b0 & SteamController::BTN_R4) AppendChordToken(chord, L"R4");
@@ -272,23 +373,42 @@ ControllerManager::UiNavigationState ControllerManager::GetUiNavigationState() c
         memcpy(buf.data(), m_lastReport.data(), n);
     }
 
-    if (n < 18 || buf[0] != SteamController::REPORT_STATE)
+    if (n < 18 || !SteamController::UsesLegacyStateLayout(buf.data(), n))
         return {};
 
-    const uint8_t b0 = buf[2];
-    const uint8_t b1 = buf[3];
-    const uint8_t b2 = buf[4];
-
     UiNavigationState state;
-    state.confirm = (b0 & SteamController::BTN_A) != 0;
-    state.back = ((b0 & SteamController::BTN_B) != 0) || ((b1 & SteamController::BTN_VIEW) != 0);
-    state.clear = (b0 & SteamController::BTN_X) != 0;
-    state.record = (b0 & SteamController::BTN_Y) != 0;
-    state.previous = (b2 & SteamController::BTN_LB) != 0;
-    state.next = (b1 & SteamController::BTN_RB) != 0;
-    state.up = (b1 & SteamController::BTN_DPAD_UP) != 0;
-    state.right = (b1 & SteamController::BTN_DPAD_RT) != 0;
-    state.down = (b1 & SteamController::BTN_DPAD_DN) != 0;
-    state.left = (b1 & SteamController::BTN_DPAD_LT) != 0;
+    const StandardGamepadState standard = GetLatestStandardState();
+    if (standard.connected) {
+        state.confirm = standard.a;
+        state.back = standard.b || standard.back;
+        state.clear = standard.x;
+        state.record = standard.y;
+        state.previous = standard.leftShoulder;
+        state.next = standard.rightShoulder;
+        state.up = standard.dpadUp;
+        state.right = standard.dpadRight;
+        state.down = standard.dpadDown;
+        state.left = standard.dpadLeft;
+    } else {
+        const uint8_t b0 = buf[2];
+        const uint8_t b1 = buf[3];
+        const uint8_t b2 = buf[4];
+        state.confirm = (b0 & SteamController::BTN_A) != 0;
+        state.back = ((b0 & SteamController::BTN_B) != 0) || ((b1 & SteamController::BTN_VIEW) != 0);
+        state.clear = (b0 & SteamController::BTN_X) != 0;
+        state.record = (b0 & SteamController::BTN_Y) != 0;
+        state.previous = (b2 & SteamController::BTN_LB) != 0;
+        state.next = (b1 & SteamController::BTN_RB) != 0;
+        state.up = (b1 & SteamController::BTN_DPAD_UP) != 0;
+        state.right = (b1 & SteamController::BTN_DPAD_RT) != 0;
+        state.down = (b1 & SteamController::BTN_DPAD_DN) != 0;
+        state.left = (b1 & SteamController::BTN_DPAD_LT) != 0;
+    }
     return state;
+}
+
+std::wstring ControllerManager::GetControllerReportSignature() const {
+    if (!g_ctrl)
+        return {};
+    return g_ctrl->GetLastReportSignature();
 }

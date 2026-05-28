@@ -44,13 +44,74 @@ function Get-SingleFile([string]$Root, [string]$Pattern, [string]$Description) {
     return $matches[0]
 }
 
-function Install-DesktopApp([string]$SourceExePath) {
+function Test-UsbIpDriverPresent {
+    $services = @(
+        Get-Service -Name 'usbip_vhci' -ErrorAction SilentlyContinue,
+        Get-Service -Name 'usbip2_vhci' -ErrorAction SilentlyContinue
+    ) | Where-Object { $_ }
+    if ($services) {
+        return $true
+    }
+
+    $driverText = & pnputil.exe /enum-drivers 2>$null | Out-String
+    return ($driverText -match 'usbip' -or $driverText -match 'vhci')
+}
+
+function Get-LatestUsbIpInstaller {
+    $release = Invoke-RestMethod -Headers @{ 'User-Agent' = 'SteamControllerRemapperInstaller' } `
+        -Uri 'https://api.github.com/repos/vadimgrn/usbip-win2/releases/latest'
+    $asset = $release.assets |
+        Where-Object { $_.name -match '^USBip-.*-x64\.exe$' } |
+        Select-Object -First 1
+    if (-not $asset) {
+        throw 'Could not find an x64 usbip-win2 installer asset in the latest GitHub release.'
+    }
+
+    return [pscustomobject]@{
+        Tag = $release.tag_name
+        Name = $asset.name
+        Url = $asset.browser_download_url
+    }
+}
+
+function Install-UsbIp {
+    if (Test-UsbIpDriverPresent) {
+        Write-InstallerLog 'USBIP driver already present. Skipping usbip-win2 installation.'
+        return
+    }
+
+    $asset = Get-LatestUsbIpInstaller
+    $downloadDir = Join-Path $env:TEMP 'SteamControllerRemapper-Installer'
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    $installerPath = Join-Path $downloadDir $asset.Name
+
+    Write-InstallerLog "Downloading usbip-win2 $($asset.Tag) from $($asset.Url)"
+    Invoke-WebRequest -Headers @{ 'User-Agent' = 'SteamControllerRemapperInstaller' } `
+        -Uri $asset.Url -OutFile $installerPath
+
+    $installLogPath = Join-Path $downloadDir 'usbip-win2-install.log'
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=`"$installLogPath`"")
+    Write-InstallerLog "Installing usbip-win2 from $installerPath"
+    $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "usbip-win2 installer failed with exit code $($process.ExitCode). See $installLogPath"
+    }
+
+    Start-Sleep -Seconds 2
+    if (-not (Test-UsbIpDriverPresent)) {
+        throw 'usbip-win2 installer completed, but the USBIP driver was still not detected. A reboot may be required.'
+    }
+
+    Write-InstallerLog "Installed usbip-win2 $($asset.Tag)"
+}
+
+function Install-DesktopApp([string]$DesktopSourcePath) {
     $installDir = Join-Path ${env:ProgramFiles} 'Steam Controller Remapper'
     $targetExePath = Join-Path $installDir 'Steam Controller Remapper.exe'
 
     Get-Process -Name 'Steam Controller Remapper' -ErrorAction SilentlyContinue | Stop-Process -Force
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-    Copy-Item -LiteralPath $SourceExePath -Destination $targetExePath -Force
+    Copy-Item -Path (Join-Path $DesktopSourcePath '*') -Destination $installDir -Recurse -Force
 
     $startMenuDir = Join-Path ${env:ProgramData} 'Microsoft\Windows\Start Menu\Programs'
     $shortcutPath = Join-Path $startMenuDir 'Steam Controller Remapper.lnk'
@@ -143,17 +204,23 @@ if (-not (Test-Path $widgetPackageRoot)) {
     throw "Expected widget package folder '$widgetPackageRoot' was not found."
 }
 
-$desktopExe = Get-SingleFile -Root $desktopRoot -Pattern '*.exe' -Description 'desktop executable'
+$desktopExe = Get-SingleFile -Root $desktopRoot -Pattern 'Steam Controller Remapper.exe' -Description 'desktop executable'
+$desktopViiperDll = Join-Path $desktopRoot 'libVIIPER.dll'
 $widgetInstallerScript = Join-Path $widgetPackageRoot 'Add-AppDevPackage.ps1'
 $certificateFile = Join-Path $widgetPackageRoot 'SteamControllerRemapperWidget.cer'
 if (-not (Test-Path $widgetInstallerScript)) {
     throw "Expected widget installer script '$widgetInstallerScript' was not found."
 }
+if (-not (Test-Path $desktopViiperDll)) {
+    throw "Expected libVIIPER.dll at '$desktopViiperDll' was not found."
+}
 
 Write-InstallerLog 'Steam Controller Remapper installer'
 Write-InstallerLog "Bundle root: $bundleRoot"
 
-$installedExePath = Install-DesktopApp -SourceExePath $desktopExe.FullName
+Install-UsbIp
+
+$installedExePath = Install-DesktopApp -DesktopSourcePath $desktopRoot
 Enable-Startup -InstalledExePath $installedExePath
 
 Import-BundleCertificate -CertificateFile $certificateFile

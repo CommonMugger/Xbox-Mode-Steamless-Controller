@@ -1,8 +1,28 @@
 cmake_minimum_required(VERSION 3.20)
-project(SteamControllerRemapper CXX)
+project(SteamControllerRemapper VERSION 1.4.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(FetchContent)
+include(cmake/SDLVersion.cmake)
+
+option(SCR_FETCH_SDL "Fetch the pinned SDL dependency for future input integration" ON)
+
+if (SCR_FETCH_SDL)
+    set(SCR_SDL_GIT_TAG "release-${SCR_SDL_VERSION}")
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG ${SCR_SDL_GIT_TAG}
+        GIT_SHALLOW TRUE
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(SDL3)
+endif()
 
 # Shared HID + Steam Controller library code
 add_library(SteamController STATIC
@@ -25,18 +45,6 @@ if (MSVC)
     set_target_properties(SteamProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
 endif()
 
-# ViGEmClient (built from source, static)
-add_library(ViGEmClient STATIC
-    third_party/ViGEmClient-1.16.18.0/src/ViGEmClient.cpp
-)
-target_include_directories(ViGEmClient PUBLIC
-    third_party/ViGEmClient-1.16.18.0/include
-)
-target_link_libraries(ViGEmClient PUBLIC setupapi)
-if (MSVC)
-    target_compile_options(ViGEmClient PRIVATE /W0)
-endif()
-
 # RawGameController diagnostic probe (WinRT)
 add_executable(RawControllerProbe
     src/probe/RawControllerProbe.cpp
@@ -53,6 +61,7 @@ add_executable(SteamControllerRemapper WIN32
     src/app/RemapBackend.cpp
     src/app/RemapIpcServer.cpp
     src/app/ControllerManager.cpp
+    src/app/SdlGamepadInput.cpp
     src/app/VirtualController.cpp
     src/app/PaddleOverlay.cpp
     src/app/PaddleConfig.cpp
@@ -62,11 +71,23 @@ add_executable(SteamControllerRemapper WIN32
     src/app/TrackpadMouse.cpp
     resources/app.rc
 )
-target_include_directories(SteamControllerRemapper PRIVATE resources)
-target_link_libraries(SteamControllerRemapper PRIVATE SteamController ViGEmClient gdiplus ole32 comctl32)
+target_include_directories(SteamControllerRemapper PRIVATE resources third_party)
+target_link_libraries(SteamControllerRemapper PRIVATE SteamController gdiplus ole32 comctl32)
+target_link_libraries(SteamControllerRemapper PRIVATE winhttp)
+target_link_libraries(SteamControllerRemapper PRIVATE urlmon)
+if (TARGET SDL3::SDL3)
+    target_link_libraries(SteamControllerRemapper PRIVATE SDL3::SDL3)
+endif()
+target_compile_definitions(SteamControllerRemapper PRIVATE SCR_APP_VERSION="${PROJECT_VERSION}")
 set_target_properties(SteamControllerRemapper PROPERTIES
     OUTPUT_NAME "Steam Controller Remapper"
 )
 if (MSVC)
     target_compile_options(SteamControllerRemapper PRIVATE /W4 /WX)
 endif()
+
+add_custom_command(TARGET SteamControllerRemapper POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/third_party/libVIIPER/libVIIPER.dll"
+        "$<TARGET_FILE_DIR:SteamControllerRemapper>/libVIIPER.dll"
+)

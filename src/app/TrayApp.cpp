@@ -8,13 +8,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstring>
+#include <filesystem>
 #include <dbt.h>
 #include <shellapi.h>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <tlhelp32.h>
+#include <winhttp.h>
 #include <winreg.h>
+#include <urlmon.h>
 
 static TrayApp* g_app = nullptr;
 
@@ -27,6 +31,16 @@ static constexpr wchar_t LEGACY_APP_NAME[] = L"Xbox Mode Steamless Controller";
 static constexpr wchar_t OLD_APP_NAME[]  = L"SteamlessController";
 static constexpr wchar_t REG_LAST_PROFILE[] = L"LastActiveProfileId";
 static constexpr wchar_t REG_MANUAL_OVERRIDE[] = L"ManualProfileOverride";
+static constexpr wchar_t REG_CONTROLLER_REPORT_SIGNATURE[] = L"ControllerReportSignature";
+static constexpr wchar_t UPDATE_URL[] = L"https://github.com/CommonMugger/Steam-Controller-Remapper/releases/latest";
+static constexpr wchar_t UPDATE_ASSET_NAME[] = L"SteamControllerRemapper-Installer.zip";
+#define SCR_WIDEN2(x) L##x
+#define SCR_WIDEN(x) SCR_WIDEN2(x)
+#ifdef SCR_APP_VERSION
+static constexpr wchar_t APP_VERSION[] = SCR_WIDEN(SCR_APP_VERSION);
+#else
+static constexpr wchar_t APP_VERSION[] = L"1.4.2";
+#endif
 
 static bool HasRunEntry(const wchar_t* name) {
     HKEY key;
@@ -91,6 +105,237 @@ static std::string JsonEscape(const std::wstring& value) {
         }
     }
     return out.str();
+}
+
+static std::wstring ReadRegistryStringValue(HKEY key, const wchar_t* name, const std::wstring& def = {}) {
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || size < sizeof(wchar_t)) {
+        return def;
+    }
+
+    std::wstring value(size / sizeof(wchar_t), L'\0');
+    if (RegQueryValueExW(key, name, nullptr, nullptr,
+                         reinterpret_cast<LPBYTE>(value.data()), &size) != ERROR_SUCCESS) {
+        return def;
+    }
+
+    if (!value.empty() && value.back() == L'\0')
+        value.pop_back();
+    return value;
+}
+
+static std::string HttpGetUtf8(const wchar_t* host, INTERNET_PORT port, const wchar_t* path, bool secure) {
+    std::string body;
+    HINTERNET session = WinHttpOpen(L"SteamControllerRemapper/1.0",
+                                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                    WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS,
+                                    0);
+    if (!session)
+        return body;
+
+    HINTERNET connect = WinHttpConnect(session, host, port, 0);
+    if (!connect) {
+        WinHttpCloseHandle(session);
+        return body;
+    }
+
+    DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET request = WinHttpOpenRequest(connect, L"GET", path, nullptr,
+                                           WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                           flags);
+    if (!request) {
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return body;
+    }
+
+    const wchar_t* headers = L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
+    bool ok = WinHttpSendRequest(request, headers, static_cast<DWORD>(-1L),
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+              WinHttpReceiveResponse(request, nullptr);
+    if (ok) {
+        for (;;) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available) || available == 0)
+                break;
+            std::string chunk(static_cast<size_t>(available), '\0');
+            DWORD read = 0;
+            if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0)
+                break;
+            chunk.resize(read);
+            body += chunk;
+        }
+    }
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    return body;
+}
+
+static std::string ExtractJsonStringField(const std::string& json, const char* fieldName) {
+    std::string needle = "\"";
+    needle += fieldName;
+    needle += "\":\"";
+    size_t start = json.find(needle);
+    if (start == std::string::npos)
+        return {};
+    start += needle.size();
+    std::string value;
+    bool escaping = false;
+    for (size_t i = start; i < json.size(); ++i) {
+        char ch = json[i];
+        if (escaping) {
+            value.push_back(ch);
+            escaping = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaping = true;
+            continue;
+        }
+        if (ch == '"')
+            break;
+        value.push_back(ch);
+    }
+    return value;
+}
+
+static std::string ExtractReleaseAssetDownloadUrl(const std::string& json, const std::string& assetNameUtf8) {
+    std::string nameNeedle = "\"name\":\"";
+    nameNeedle += assetNameUtf8;
+    nameNeedle += "\"";
+    const size_t namePos = json.find(nameNeedle);
+    if (namePos == std::string::npos)
+        return {};
+
+    const size_t urlPos = json.find("\"browser_download_url\":\"", namePos);
+    if (urlPos == std::string::npos)
+        return {};
+
+    const size_t valuePos = urlPos + std::strlen("\"browser_download_url\":\"");
+    std::string value;
+    bool escaping = false;
+    for (size_t i = valuePos; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (escaping) {
+            value.push_back(ch);
+            escaping = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaping = true;
+            continue;
+        }
+        if (ch == '"')
+            break;
+        value.push_back(ch);
+    }
+    return value;
+}
+
+static bool EnsureDirectoryExists(const std::wstring& path) {
+    std::error_code ec;
+    if (path.empty())
+        return false;
+    std::filesystem::create_directories(path, ec);
+    return !ec;
+}
+
+static bool DownloadFileToPath(const std::wstring& url, const std::wstring& destinationPath) {
+    const size_t slash = destinationPath.find_last_of(L"\\/");
+    if (slash == std::wstring::npos)
+        return false;
+    if (!EnsureDirectoryExists(destinationPath.substr(0, slash)))
+        return false;
+    const HRESULT hr = URLDownloadToFileW(nullptr, url.c_str(), destinationPath.c_str(), 0, nullptr);
+    return SUCCEEDED(hr);
+}
+
+static bool ExpandZipArchive(const std::wstring& zipPath, const std::wstring& destinationPath) {
+    if (!EnsureDirectoryExists(destinationPath))
+        return false;
+
+    std::wstring command = L"-NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '";
+    command += zipPath;
+    command += L"' -DestinationPath '";
+    command += destinationPath;
+    command += L"' -Force\"";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::wstring mutableCommand = command;
+    if (!CreateProcessW(L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                        mutableCommand.data(),
+                        nullptr,
+                        nullptr,
+                        FALSE,
+                        CREATE_NO_WINDOW,
+                        nullptr,
+                        nullptr,
+                        &si,
+                        &pi)) {
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return exitCode == 0;
+}
+
+static bool LaunchInstallerFromBundle(const std::wstring& bundleRoot) {
+    std::wstring installerCmd = bundleRoot;
+    if (!installerCmd.empty() && installerCmd.back() != L'\\')
+        installerCmd += L'\\';
+    installerCmd += L"Install-SteamControllerRemapper.cmd";
+    if (!std::filesystem::exists(installerCmd))
+        return false;
+
+    const HINSTANCE result = ShellExecuteW(nullptr, L"open", installerCmd.c_str(), nullptr, bundleRoot.c_str(), SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
+}
+
+static std::vector<int> ParseVersionParts(const std::wstring& version) {
+    std::wstring cleaned = version;
+    if (!cleaned.empty() && (cleaned.front() == L'v' || cleaned.front() == L'V'))
+        cleaned.erase(cleaned.begin());
+
+    std::vector<int> parts;
+    std::wstring token;
+    for (wchar_t ch : cleaned) {
+        if (ch == L'.') {
+            parts.push_back(token.empty() ? 0 : _wtoi(token.c_str()));
+            token.clear();
+        } else if (ch >= L'0' && ch <= L'9') {
+            token.push_back(ch);
+        } else {
+            break;
+        }
+    }
+    if (!token.empty())
+        parts.push_back(_wtoi(token.c_str()));
+    return parts;
+}
+
+static int CompareVersions(const std::wstring& left, const std::wstring& right) {
+    std::vector<int> a = ParseVersionParts(left);
+    std::vector<int> b = ParseVersionParts(right);
+    const size_t count = (std::max)(a.size(), b.size());
+    a.resize(count, 0);
+    b.resize(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
 }
 
 static void SendWinGToggle() {
@@ -430,8 +675,10 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     RegisterDeviceNotificationW(m_hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
     m_controller = std::make_unique<ControllerManager>(
-        [this](bool connected, bool gameModeActive, bool vigemMissing) {
-            UpdateTrayIcon(connected, gameModeActive, vigemMissing);
+        [this](bool connected, bool gameModeActive, bool outputBackendMissing) {
+            UpdateTrayIcon(connected, gameModeActive, outputBackendMissing);
+            if (connected)
+                CheckControllerReportSignature();
         });
     m_ipcServer = std::make_unique<RemapIpcServer>(
         [this](const std::string& request) { return HandleIpcRequest(request); });
@@ -439,6 +686,7 @@ bool TrayApp::Init(HINSTANCE hInstance) {
     m_steamRunning = IsSteamRunning();
     LoadSettings();
     LoadPaddleConfig();
+    CheckControllerReportSignature();
     ApplyProfileById(m_remapBackend.GetActiveProfileId(), true);
     if ((HasRunEntry(LEGACY_APP_NAME) || HasRunEntry(OLD_APP_NAME)) && !HasRunEntry(APP_NAME))
         SetStartupEnabled(true);
@@ -487,7 +735,7 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_TRAY:
         if (LOWORD(lp) == NIN_BALLOONUSERCLICK)
-            ShellExecuteW(nullptr, L"open", L"https://github.com/nefarius/ViGEmBus/releases/latest",
+            ShellExecuteW(nullptr, L"open", L"https://github.com/Alia5/VIIPER",
                           nullptr, nullptr, SW_SHOWNORMAL);
         else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP)
             ShowContextMenu();
@@ -530,6 +778,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_CONFIGURE_PADDLES:
             if (!m_steamRunning)
                 ShowPaddleConfigWindow();
+            break;
+        case IDM_CHECK_UPDATES:
+            CheckForUpdates(true);
             break;
         case IDM_EXIT:
             m_controller->DisableGameMode();
@@ -628,8 +879,8 @@ void TrayApp::RemoveTrayIcon() {
     Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
-void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool vigemMissing) {
-    if (vigemMissing) { ShowViGEmBalloon(); return; }
+void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool outputBackendMissing) {
+    if (outputBackendMissing) { ShowOutputBackendBalloon(); return; }
     bool gameModeOn = gameModeActive;
 
     const wchar_t* tip = gameModeOn  ? L"Steam Controller Remapper - Steamless Mode ON"
@@ -646,15 +897,15 @@ void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool vigemMiss
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-void TrayApp::ShowViGEmBalloon() {
+void TrayApp::ShowOutputBackendBalloon() {
     NOTIFYICONDATAW nid{};
     nid.cbSize           = sizeof(nid);
     nid.hWnd             = m_hwnd;
     nid.uID              = TRAY_UID;
     nid.uFlags           = NIF_INFO;
     nid.dwInfoFlags      = NIIF_WARNING;
-    wcscpy_s(nid.szInfoTitle, L"Driver required");
-    wcscpy_s(nid.szInfo,      L"ViGEmBus is not installed. Click here to download it.");
+    wcscpy_s(nid.szInfoTitle, L"Virtual controller backend unavailable");
+    wcscpy_s(nid.szInfo,      L"VIIPER/libVIIPER could not start. Click here for the project page.");
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
@@ -754,6 +1005,7 @@ void TrayApp::ReconcileAutoMode() {
 
     bool shouldAutoEnable = m_autoEnableSteamlessMode &&
                             m_controller->IsConnected() &&
+                            !m_controller->IsOutputBackendMissing() &&
                             !m_steamRunning;
 
     if (shouldAutoEnable && !m_controller->IsGameModeActive()) {
@@ -761,6 +1013,124 @@ void TrayApp::ReconcileAutoMode() {
     } else if (m_steamRunning && m_controller->IsGameModeActive()) {
         m_controller->DisableGameMode();
     }
+}
+
+void TrayApp::ShowFirmwareChangedBalloon(const std::wstring& signature) {
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = m_hwnd;
+    nid.uID = TRAY_UID;
+    nid.uFlags = NIF_INFO;
+    wcscpy_s(nid.szInfoTitle, L"Steam Controller firmware/input changed");
+    std::wstring message = L"Detected controller input signature: " + signature +
+        L". If anything acts strange, use Check for Updates.";
+    wcsncpy_s(nid.szInfo, message.c_str(), _TRUNCATE);
+    nid.dwInfoFlags = NIIF_WARNING;
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+void TrayApp::CheckControllerReportSignature() {
+    if (!m_controller || !m_controller->IsConnected())
+        return;
+
+    const std::wstring signature = m_controller->GetControllerReportSignature();
+    if (signature.empty())
+        return;
+
+    if (m_savedControllerReportSignature.empty()) {
+        m_savedControllerReportSignature = signature;
+        SaveSettings();
+        logging::Logf("[Firmware] Stored initial controller report signature=%s",
+                      logging::Narrow(signature).c_str());
+        return;
+    }
+
+    if (m_savedControllerReportSignature != signature) {
+        logging::Logf("[Firmware] Controller report signature changed old=%s new=%s",
+                      logging::Narrow(m_savedControllerReportSignature).c_str(),
+                      logging::Narrow(signature).c_str());
+        ShowFirmwareChangedBalloon(signature);
+        m_savedControllerReportSignature = signature;
+        SaveSettings();
+        CheckForUpdates(false);
+    }
+}
+
+void TrayApp::CheckForUpdates(bool userInitiated) {
+    std::thread([this, userInitiated]() {
+        const std::string json = HttpGetUtf8(L"api.github.com",
+                                             INTERNET_DEFAULT_HTTPS_PORT,
+                                             L"/repos/CommonMugger/Steam-Controller-Remapper/releases/latest",
+                                             true);
+        if (json.empty()) {
+            if (userInitiated) {
+                MessageBoxW(nullptr,
+                            L"Could not check GitHub for updates right now.",
+                            APP_NAME,
+                            MB_OK | MB_ICONWARNING);
+            }
+            return;
+        }
+
+        const std::wstring latestTag = WidenUtf8(ExtractJsonStringField(json, "tag_name"));
+        const std::wstring latestUrl = WidenUtf8(ExtractJsonStringField(json, "html_url"));
+        const std::wstring installerUrl = WidenUtf8(
+            ExtractReleaseAssetDownloadUrl(json, logging::Narrow(std::wstring(UPDATE_ASSET_NAME))));
+        if (latestTag.empty()) {
+            if (userInitiated) {
+                MessageBoxW(nullptr,
+                            L"GitHub responded, but the latest release tag could not be read.",
+                            APP_NAME,
+                            MB_OK | MB_ICONWARNING);
+            }
+            return;
+        }
+
+        const int cmp = CompareVersions(APP_VERSION, latestTag);
+        if (cmp < 0) {
+            std::wstring prompt = L"A newer version is available: ";
+            prompt += latestTag;
+            prompt += L"\n\nDownload and install it now?";
+            if (MessageBoxW(nullptr, prompt.c_str(), APP_NAME, MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+                bool launchedInstaller = false;
+                if (!installerUrl.empty()) {
+                    std::wstring tempRoot;
+                    tempRoot.resize(MAX_PATH);
+                    const DWORD pathLen = GetTempPathW(static_cast<DWORD>(tempRoot.size()), tempRoot.data());
+                    if (pathLen > 0 && pathLen < tempRoot.size()) {
+                        tempRoot.resize(pathLen);
+                        std::wstring updateRoot = tempRoot + L"SteamControllerRemapper-Updater";
+                        std::wstring zipPath = updateRoot + L"\\" + UPDATE_ASSET_NAME;
+                        std::wstring extractRoot = updateRoot + L"\\bundle";
+
+                        std::error_code ec;
+                        std::filesystem::remove_all(updateRoot, ec);
+                        if (EnsureDirectoryExists(updateRoot) &&
+                            DownloadFileToPath(installerUrl, zipPath) &&
+                            ExpandZipArchive(zipPath, extractRoot) &&
+                            LaunchInstallerFromBundle(extractRoot)) {
+                            launchedInstaller = true;
+                        }
+                    }
+                }
+
+                if (!launchedInstaller) {
+                    std::wstring fallbackPrompt =
+                        L"Automatic download/install could not be started.\n\nOpen the release page instead?";
+                    if (MessageBoxW(nullptr, fallbackPrompt.c_str(), APP_NAME, MB_YESNO | MB_ICONWARNING) == IDYES) {
+                        const wchar_t* url = latestUrl.empty() ? UPDATE_URL : latestUrl.c_str();
+                        ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                }
+            }
+        } else if (userInitiated) {
+            std::wstring message = L"You're up to date.\n\nCurrent version: ";
+            message += APP_VERSION;
+            message += L"\nLatest release: ";
+            message += latestTag;
+            MessageBoxW(nullptr, message.c_str(), APP_NAME, MB_OK | MB_ICONINFORMATION);
+        }
+    }).detach();
 }
 
 bool TrayApp::IsStartupEnabled() const {
@@ -824,6 +1194,7 @@ void TrayApp::LoadSettings() {
     m_controller->SetPaddleMapping(2, static_cast<PaddleMapping>(readDword(L"PaddleMapR4", 0)));
     m_controller->SetPaddleMapping(3, static_cast<PaddleMapping>(readDword(L"PaddleMapR5", 0)));
     m_controller->SetPaddleMapping(4, static_cast<PaddleMapping>(readDword(L"PaddleMapQAM", 0)));
+    m_savedControllerReportSignature = ReadRegistryStringValue(key, REG_CONTROLLER_REPORT_SIGNATURE);
     m_manualProfileOverride = false;
 
     RegCloseKey(key);
@@ -866,6 +1237,7 @@ void TrayApp::SaveSettings() {
     writeDword(L"PaddleMapQAM", static_cast<DWORD>(paddles.qam));
     writeString(REG_LAST_PROFILE, m_remapBackend.GetActiveProfileId());
     writeBool(REG_MANUAL_OVERRIDE, m_manualProfileOverride);
+    writeString(REG_CONTROLLER_REPORT_SIGNATURE, m_savedControllerReportSignature);
 
     RegCloseKey(key);
 }
@@ -1197,6 +1569,8 @@ void TrayApp::ShowContextMenu() {
     UINT startupFlags = MF_STRING | (startupOn ? MF_CHECKED : MF_UNCHECKED);
     AppendMenuW(menu, startupFlags, IDM_STARTUP, L"Start with Windows");
 
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_CHECK_UPDATES, L"Check for Updates...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
 

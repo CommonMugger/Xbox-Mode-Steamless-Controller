@@ -58,7 +58,7 @@ That produces a folder containing:
 - the signed widget `.msix`
 - the `Dependencies` folder
 - an exported `.cer`
-- the desktop `Steam Controller Remapper.exe`
+- only the required desktop runtime files: `Steam Controller Remapper.exe` and `libVIIPER.dll`
 - `Install-SteamControllerRemapper.ps1`
 
 End users can then extract that bundle and run `Install-SteamControllerRemapper.ps1` as administrator, similar to the GoTweaks install flow.

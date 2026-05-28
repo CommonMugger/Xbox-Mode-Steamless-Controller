@@ -4,12 +4,14 @@ This folder is the single installer bundle for both:
 
 - the desktop remapper app
 - the Xbox Game Bar widget
+- the USBIP dependency required by VIIPER, downloaded from the latest upstream `usbip-win2` release during install
 
 ## Contents
 
 - `Install-SteamControllerRemapper.cmd`
 - `Install-SteamControllerRemapper.ps1`
 - `Desktop\Steam Controller Remapper.exe`
+- `Desktop\libVIIPER.dll`
 - `WidgetPackage\Add-AppDevPackage.ps1`
 - `WidgetPackage\SteamControllerRemapperWidget_*.msix`
 - `WidgetPackage\Dependencies\...`
@@ -20,9 +22,16 @@ This folder is the single installer bundle for both:
 2. Double-click `Install-SteamControllerRemapper.cmd`.
 3. It will launch PowerShell with `-ExecutionPolicy Bypass`.
 4. If it is not already running as administrator, it will relaunch itself elevated. Accept the elevation prompt.
-5. Let the script install the desktop app, enable Start with Windows, install the widget, and refresh Xbox Game Bar.
+5. Let the script install `usbip-win2` if needed, install the desktop app, enable Start with Windows, install the widget, and refresh Xbox Game Bar.
 6. Open Xbox Game Bar with `Win + G`.
 7. Add the `Steam Controller Remapper` widget from the Widgets menu.
+
+The bundle now intentionally ships only the required desktop runtime files:
+
+- `Desktop\Steam Controller Remapper.exe`
+- `Desktop\libVIIPER.dll`
+
+The staged desktop executable is signed with the same local release certificate used for the widget package.
 
 ## Rebuilding the bundle
 

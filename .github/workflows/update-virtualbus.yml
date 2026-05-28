@@ -1,0 +1,108 @@
+name: Update Virtual Bus Dependencies
+
+on:
+  schedule:
+    - cron: "30 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-virtualbus
+  cancel-in-progress: false
+
+jobs:
+  update-virtualbus:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for VIIPER and USBIP updates
+        id: deps
+        shell: pwsh
+        run: ./scripts/Update-VirtualBusDeps.ps1 -Apply
+
+      - name: Stop when no update is needed
+        if: steps.deps.outputs.changed != 'true'
+        run: echo "Virtual bus dependencies are already current."
+
+      - name: Configure git
+        if: steps.deps.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit dependency refresh
+        if: steps.deps.outputs.changed == 'true'
+        id: commit
+        shell: bash
+        env:
+          VIIPER_VERSION: ${{ steps.deps.outputs.latest_viiper_version }}
+          USBIP_VERSION: ${{ steps.deps.outputs.latest_usbip_version }}
+        run: |
+          BRANCH="bot/virtualbus-${VIIPER_VERSION}-${USBIP_VERSION}"
+          git checkout -B "$BRANCH"
+          git add cmake/VirtualBusVersions.cmake third_party/libVIIPER/libVIIPER.dll third_party/libVIIPER/libVIIPER.h
+          git commit -m "deps: update virtual bus dependencies"
+          git push --force --set-upstream origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update pull request
+        if: steps.deps.outputs.changed == 'true'
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          VIIPER_VERSION: ${{ steps.deps.outputs.latest_viiper_version }}
+          USBIP_VERSION: ${{ steps.deps.outputs.latest_usbip_version }}
+          CURRENT_VIIPER_VERSION: ${{ steps.deps.outputs.current_viiper_version }}
+          CURRENT_USBIP_VERSION: ${{ steps.deps.outputs.current_usbip_version }}
+          CHANGE_KIND: ${{ steps.deps.outputs.change_kind }}
+          VIIPER_CHANGED: ${{ steps.deps.outputs.viiper_changed }}
+          USBIP_CHANGED: ${{ steps.deps.outputs.usbip_changed }}
+        run: |
+          EXISTING="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')"
+          TITLE="[VirtualBus] Update VIIPER to ${VIIPER_VERSION} and USBIP to ${USBIP_VERSION}"
+          if [ "$VIIPER_CHANGED" != "true" ]; then
+            TITLE="[VirtualBus] Update USBIP to ${USBIP_VERSION}"
+          elif [ "$USBIP_CHANGED" != "true" ]; then
+            TITLE="[VirtualBus] Update VIIPER to ${VIIPER_VERSION}"
+          fi
+          if [ -n "$EXISTING" ]; then
+            echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BODY=$(cat <<EOF
+          Automated virtual bus dependency update.
+
+          - Current VIIPER version: ${CURRENT_VIIPER_VERSION}
+          - New VIIPER version: ${VIIPER_VERSION}
+          - Current USBIP version: ${CURRENT_USBIP_VERSION}
+          - New USBIP version: ${USBIP_VERSION}
+          - Change kind: ${CHANGE_KIND}
+
+          The installer continues to fetch the latest upstream usbip-win2 release at install time.
+          EOF
+          )
+          NUMBER="$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body "$BODY" \
+            | sed 's#.*/##')"
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge for patch/minor updates
+        if: steps.deps.outputs.changed == 'true' && (steps.deps.outputs.change_kind == 'patch' || steps.deps.outputs.change_kind == 'minor')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge "${{ steps.pr.outputs.number }}" --auto --squash --delete-branch

@@ -1,0 +1,96 @@
+name: Update SDL
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-sdl
+  cancel-in-progress: false
+
+jobs:
+  update-sdl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for SDL release updates
+        id: sdl
+        shell: pwsh
+        run: ./scripts/Update-SdlVersion.ps1 -Apply
+
+      - name: Stop when no update is needed
+        if: steps.sdl.outputs.changed != 'true'
+        run: echo "SDL is already current."
+
+      - name: Configure git
+        if: steps.sdl.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit version bump
+        if: steps.sdl.outputs.changed == 'true'
+        id: commit
+        shell: bash
+        env:
+          SDL_VERSION: ${{ steps.sdl.outputs.latest_version }}
+        run: |
+          BRANCH="bot/sdl-${SDL_VERSION}"
+          git checkout -B "$BRANCH"
+          git add cmake/SDLVersion.cmake
+          git commit -m "deps: update SDL to ${SDL_VERSION}"
+          git push --force --set-upstream origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update pull request
+        if: steps.sdl.outputs.changed == 'true'
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDL_VERSION: ${{ steps.sdl.outputs.latest_version }}
+          CHANGE_KIND: ${{ steps.sdl.outputs.change_kind }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
+        run: |
+          EXISTING="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')"
+          TITLE="[SDL] Update SDL to ${SDL_VERSION}"
+          if [ -n "$EXISTING" ]; then
+            echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BODY=$(cat <<EOF
+          Automated SDL dependency update.
+
+          - Current pinned version: ${{ steps.sdl.outputs.current_version }}
+          - New pinned version: ${SDL_VERSION}
+          - Change kind: ${CHANGE_KIND}
+
+          Patch and minor SDL updates are eligible for auto-merge after CI passes.
+          Major SDL updates stay manual.
+          EOF
+          )
+          NUMBER="$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body "$BODY" \
+            | sed 's#.*/##')"
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge for patch/minor updates
+        if: steps.sdl.outputs.changed == 'true' && (steps.sdl.outputs.change_kind == 'patch' || steps.sdl.outputs.change_kind == 'minor')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge "${{ steps.pr.outputs.number }}" --auto --squash --delete-branch

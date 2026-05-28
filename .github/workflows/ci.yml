@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "bot/sdl-*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Release
+        shell: pwsh
+        run: cmake --preset release
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build --preset release
+
+      - name: Controller init smoke
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "build\release\Release\Steam Controller Remapper.exe"
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited) {
+              throw "Steam Controller Remapper exited early during smoke startup."
+          }
+          Stop-Process -Id $process.Id -Force

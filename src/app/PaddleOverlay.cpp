@@ -1,4 +1,5 @@
 #include "PaddleOverlay.h"
+#include "logging/Log.h"
 #include "steam/SteamController.h"
 #include <Windows.h>
 #include <array>
@@ -7,7 +8,21 @@
 #include <vector>
 
 namespace {
-bool IsPressed(const uint8_t* buf, int paddleIndex) {
+bool IsPressed(const uint8_t* buf, size_t n, int paddleIndex, const StandardGamepadState* standardState) {
+    if (standardState && standardState->connected) {
+        switch (paddleIndex) {
+        case 0: return standardState->leftPaddle1;
+        case 1: return standardState->leftPaddle2;
+        case 2: return standardState->rightPaddle1;
+        case 3: return standardState->rightPaddle2;
+        case 4: return standardState->misc1 || standardState->touchpadButton;
+        default: return false;
+        }
+    }
+
+    if (!SteamController::UsesLegacyStateLayout(buf, n))
+        return false;
+
     const uint8_t b0 = buf[2];
     const uint8_t b1 = buf[3];
     const uint8_t b2 = buf[4];
@@ -30,6 +45,27 @@ const PaddleAction& GetAction(const PaddleActionBindings& bindings, int paddleIn
     case 3: return bindings.r5;
     default: return bindings.qam;
     }
+}
+
+const wchar_t* PaddleName(int paddleIndex) {
+    switch (paddleIndex) {
+    case 0: return L"L4";
+    case 1: return L"L5";
+    case 2: return L"R4";
+    case 3: return L"R5";
+    default: return L"QAM";
+    }
+}
+
+const char* ActionTypeName(PaddleActionType type) {
+    switch (type) {
+    case PaddleActionType::UseMenuMapping: return "menu";
+    case PaddleActionType::None: return "none";
+    case PaddleActionType::Gamepad: return "gamepad";
+    case PaddleActionType::KeyChord: return "key";
+    case PaddleActionType::Macro: return "macro";
+    }
+    return "unknown";
 }
 
 void SendKeyEvent(uint16_t vk, DWORD flags) {
@@ -83,15 +119,29 @@ void PaddleOverlay::Reset() {
         m_prevPressed[i] = false;
         m_lastFireTickMs[i] = 0;
     }
+    m_hasSeededState = false;
 }
 
-void PaddleOverlay::Update(const uint8_t* buf, size_t n) {
-    if (n < 5)
+void PaddleOverlay::Update(const uint8_t* buf, size_t n, const StandardGamepadState* standardState) {
+    if ((!standardState || !standardState->connected) && !SteamController::UsesLegacyStateLayout(buf, n))
         return;
+
+    if (!m_hasSeededState) {
+        for (int i = 0; i < 5; ++i)
+            m_prevPressed[i] = IsPressed(buf, n, i, standardState);
+        m_hasSeededState = true;
+        logging::Logf("[PaddleOverlay] Seeded initial paddle state L4=%d L5=%d R4=%d R5=%d QAM=%d",
+                      m_prevPressed[0] ? 1 : 0,
+                      m_prevPressed[1] ? 1 : 0,
+                      m_prevPressed[2] ? 1 : 0,
+                      m_prevPressed[3] ? 1 : 0,
+                      m_prevPressed[4] ? 1 : 0);
+        return;
+    }
 
     for (int i = 0; i < 5; ++i) {
         const PaddleAction& action = GetAction(m_bindings, i);
-        const bool pressed = IsPressed(buf, i);
+        const bool pressed = IsPressed(buf, n, i, standardState);
         const ULONGLONG now = GetTickCount64();
 
         if (pressed) {
@@ -101,13 +151,16 @@ void PaddleOverlay::Update(const uint8_t* buf, size_t n) {
 
             if (action.type == PaddleActionType::KeyChord) {
                 if (action.rapidFire && rapidReady) {
+                    logging::Logf("[PaddleOverlay] Fire paddle=%S action=%s rapid=1", PaddleName(i), ActionTypeName(action.type));
                     TapChord(action.chord);
                     m_lastFireTickMs[i] = now;
                 } else if (rising) {
+                    logging::Logf("[PaddleOverlay] Down paddle=%S action=%s rapid=0", PaddleName(i), ActionTypeName(action.type));
                     SendChordDown(action.chord);
                 }
             } else if (action.type == PaddleActionType::Macro) {
                 if (rising || rapidReady) {
+                    logging::Logf("[PaddleOverlay] Fire paddle=%S action=%s rapid=%d", PaddleName(i), ActionTypeName(action.type), action.rapidFire ? 1 : 0);
                     RunMacro(action.macroSteps);
                     m_lastFireTickMs[i] = now;
                 }
@@ -115,6 +168,7 @@ void PaddleOverlay::Update(const uint8_t* buf, size_t n) {
         } else if (!pressed && m_prevPressed[i]) {
             if (action.type == PaddleActionType::KeyChord &&
                 !action.rapidFire) {
+                logging::Logf("[PaddleOverlay] Up paddle=%S action=%s", PaddleName(i), ActionTypeName(action.type));
                 SendChordUp(action.chord);
             }
         }
