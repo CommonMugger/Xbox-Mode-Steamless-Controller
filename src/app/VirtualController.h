@@ -80,6 +80,7 @@ public:
     void SetPaddleActions(PaddleActionBindings actions) { m_paddleActions = std::move(actions); }
 
     void Update(const uint8_t* buf, size_t n, const StandardGamepadState* standardState = nullptr);
+    void UpdateMouse(int16_t dx, int16_t dy, uint8_t buttons);
 
 private:
     static void ViiperXboxRumbleCallback(std::uintptr_t handle, uint8_t leftMotor, uint8_t rightMotor);
@@ -87,9 +88,10 @@ private:
                                         uint8_t ledRed, uint8_t ledGreen, uint8_t ledBlue,
                                         uint8_t flashOn, uint8_t flashOff);
 
-    void* m_module       = nullptr;
+    void* m_module        = nullptr;
     std::uintptr_t m_serverHandle = 0;
     std::uintptr_t m_deviceHandle = 0;
+    std::uintptr_t m_mouseHandle  = 0;
     uint32_t m_busId = 0;
     bool  m_valid        = false;
     bool  m_driverMissing = false;

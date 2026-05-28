@@ -142,6 +142,9 @@ void ControllerManager::EnableGameMode() {
     m_trackpad.SetBackButtonsEnabled(m_backButtonsEnabled);
     m_trackpad.SetUseLeftTrackpad(m_useLeftTrackpad);
     m_trackpad.SetHapticCallback([this]() { PulseTrackpadClickHaptics(); });
+    m_trackpad.SetMouseUpdateCallback([this](int16_t dx, int16_t dy, uint8_t buttons) {
+        if (m_virtual) m_virtual->UpdateMouse(dx, dy, buttons);
+    });
     m_trackpad.SetFirmwareMouseEnabled(kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled);
     m_paddleOverlay.SetBindings(m_paddleActions);
     StartReadLoop();
@@ -245,6 +248,7 @@ void ControllerManager::Close(bool restoreLizard) {
     m_virtual.reset();
     m_paddleOverlay.Reset();
     m_trackpad.SetHapticCallback({});
+    m_trackpad.SetMouseUpdateCallback({});
     if (g_ctrl) {
         if (restoreLizard && m_gameModeActive)
             g_ctrl->EnableLizardMode();

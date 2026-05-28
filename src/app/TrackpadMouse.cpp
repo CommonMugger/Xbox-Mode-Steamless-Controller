@@ -6,17 +6,22 @@
 static constexpr uint8_t BTN_TP_RT_CLICK = 0x40;  // buf[4] bit 6: right pad hard press
 static constexpr uint16_t TRACKPAD_CLICK_AREA_MIN = 16;
 
-static void SendMouseButton(DWORD flags) {
-    INPUT input{};
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = flags;
-    SendInput(1, &input, sizeof(INPUT));
+void TrackpadMouse::SetButton(uint8_t btn, bool pressed) {
+    const uint8_t prev = m_currentButtons;
+    if (pressed) m_currentButtons |= btn; else m_currentButtons &= ~btn;
+    if (m_currentButtons != prev && m_mouseCallback)
+        m_mouseCallback(0, 0, m_currentButtons);
+}
+
+void TrackpadMouse::SendMove(int16_t dx, int16_t dy) {
+    if (m_mouseCallback)
+        m_mouseCallback(dx, dy, m_currentButtons);
 }
 
 void TrackpadMouse::Reset() {
-    if (m_rightClickActive) SendMouseButton(MOUSEEVENTF_RIGHTUP);
-    if (m_prevR4) SendMouseButton(MOUSEEVENTF_LEFTUP);
-    if (m_prevR5) SendMouseButton(MOUSEEVENTF_RIGHTUP);
+    if (m_rightClickActive) SetButton(MOUSE_BTN_RIGHT, false);
+    if (m_prevR4) SetButton(MOUSE_BTN_LEFT, false);
+    if (m_prevR5) SetButton(MOUSE_BTN_RIGHT, false);
     m_touching = false;
     m_clickPressActive = false;
     m_rightClickActive = false;
@@ -24,6 +29,7 @@ void TrackpadMouse::Reset() {
     m_prevR5 = false;
     m_prevX = 0;
     m_prevY = 0;
+    m_currentButtons = 0;
     m_clickPressStartTickMs = 0;
 }
 
@@ -55,14 +61,8 @@ void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
         if (touching && m_touching) {
             const int dx = static_cast<int>(x - m_prevX);
             const int dy = -static_cast<int>(y - m_prevY);
-            if (dx != 0 || dy != 0) {
-                INPUT input{};
-                input.type = INPUT_MOUSE;
-                input.mi.dwFlags = MOUSEEVENTF_MOVE;
-                input.mi.dx = static_cast<LONG>(dx * SENSITIVITY);
-                input.mi.dy = static_cast<LONG>(dy * SENSITIVITY);
-                SendInput(1, &input, sizeof(INPUT));
-            }
+            if (dx != 0 || dy != 0)
+                SendMove(static_cast<int16_t>(dx * SENSITIVITY), static_cast<int16_t>(dy * SENSITIVITY));
         }
 
         if (touching) {
@@ -88,14 +88,8 @@ void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
         if (touching && m_touching) {
             const int dx = static_cast<int>(x - m_prevX);
             const int dy = -static_cast<int>(y - m_prevY);
-            if (dx != 0 || dy != 0) {
-                INPUT input{};
-                input.type = INPUT_MOUSE;
-                input.mi.dwFlags = MOUSEEVENTF_MOVE;
-                input.mi.dx = static_cast<LONG>(dx * SENSITIVITY);
-                input.mi.dy = static_cast<LONG>(dy * SENSITIVITY);
-                SendInput(1, &input, sizeof(INPUT));
-            }
+            if (dx != 0 || dy != 0)
+                SendMove(static_cast<int16_t>(dx * SENSITIVITY), static_cast<int16_t>(dy * SENSITIVITY));
         }
 
         if (touching) {
@@ -132,19 +126,19 @@ void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
             m_clickPressStartTickMs = now;
             m_rightClickActive = false;
         } else if (!m_rightClickActive && (now - m_clickPressStartTickMs) >= RIGHT_CLICK_HOLD_MS) {
-            SendMouseButton(MOUSEEVENTF_RIGHTDOWN);
+            SetButton(MOUSE_BTN_RIGHT, true);
             if (m_hapticCallback)
                 m_hapticCallback();
             m_rightClickActive = true;
         }
     } else if (m_clickPressActive) {
         if (m_rightClickActive) {
-            SendMouseButton(MOUSEEVENTF_RIGHTUP);
+            SetButton(MOUSE_BTN_RIGHT, false);
         } else {
             if (m_hapticCallback)
                 m_hapticCallback();
-            SendMouseButton(MOUSEEVENTF_LEFTDOWN);
-            SendMouseButton(MOUSEEVENTF_LEFTUP);
+            SetButton(MOUSE_BTN_LEFT, true);
+            SetButton(MOUSE_BTN_LEFT, false);
         }
         m_clickPressActive = false;
         m_rightClickActive = false;
@@ -167,11 +161,11 @@ void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
         }
 
         if (btn1 != m_prevR4) {
-            SendMouseButton(btn1 ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP);
+            SetButton(MOUSE_BTN_LEFT, btn1);
             m_prevR4 = btn1;
         }
         if (btn2 != m_prevR5) {
-            SendMouseButton(btn2 ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
+            SetButton(MOUSE_BTN_RIGHT, btn2);
             m_prevR5 = btn2;
         }
     }

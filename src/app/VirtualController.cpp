@@ -33,7 +33,11 @@ struct ViiperApi {
     decltype(&SetDS4DeviceState) SetDS4DeviceStateFn = nullptr;
     decltype(&SetDS4OutputCallback) SetDS4OutputCallbackFn = nullptr;
     decltype(&RemoveDS4Device) RemoveDS4DeviceFn = nullptr;
+    decltype(&CreateMouseDevice) CreateMouseDeviceFn = nullptr;
+    decltype(&SetMouseDeviceState) SetMouseDeviceStateFn = nullptr;
+    decltype(&RemoveMouseDevice) RemoveMouseDeviceFn = nullptr;
     bool loaded = false;
+    bool mouseLoaded = false;
 };
 
 std::mutex g_notificationMutex;
@@ -110,8 +114,14 @@ ViiperApi& GetViiperApi() {
             LoadProc(api.module, "SetDS4OutputCallback", api.SetDS4OutputCallbackFn) &&
             LoadProc(api.module, "RemoveDS4Device", api.RemoveDS4DeviceFn);
 
-        if (api.loaded)
-            logging::Logf("[VIIPER] libVIIPER loaded from %s", logging::Narrow(dllPath).c_str());
+        if (api.loaded) {
+            api.mouseLoaded =
+                LoadProc(api.module, "CreateMouseDevice",   api.CreateMouseDeviceFn) &&
+                LoadProc(api.module, "SetMouseDeviceState", api.SetMouseDeviceStateFn) &&
+                LoadProc(api.module, "RemoveMouseDevice",   api.RemoveMouseDeviceFn);
+            logging::Logf("[VIIPER] libVIIPER loaded from %s mouseSupport=%d",
+                          logging::Narrow(dllPath).c_str(), api.mouseLoaded ? 1 : 0);
+        }
     });
     return api;
 }
@@ -398,6 +408,16 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
         g_targetOwners[m_deviceHandle] = this;
     }
 
+    if (api.mouseLoaded) {
+        if (api.CreateMouseDeviceFn(m_serverHandle, &m_mouseHandle, m_busId, true, 0, 0) != 0)
+            logging::Logf("[VIIPER] Virtual mouse connected handle=%llu",
+                          static_cast<unsigned long long>(m_mouseHandle));
+        else {
+            logging::Logf("[VIIPER] Virtual mouse creation failed");
+            m_mouseHandle = 0;
+        }
+    }
+
     logging::Logf("[VIIPER] Virtual %s controller connected bus=%u handle=%llu",
                   m_mode == EmulationMode::DualShock4 ? "DualShock 4" : "Xbox 360",
                   m_busId,
@@ -413,6 +433,9 @@ VirtualController::~VirtualController() {
         std::lock_guard<std::mutex> lock(g_notificationMutex);
         g_targetOwners.erase(m_deviceHandle);
     }
+
+    if (api.loaded && api.mouseLoaded && m_mouseHandle)
+        api.RemoveMouseDeviceFn(m_mouseHandle);
 
     if (api.loaded && m_deviceHandle) {
         if (m_mode == EmulationMode::DualShock4) {
@@ -468,6 +491,17 @@ void VirtualController::ViiperXboxRumbleCallback(std::uintptr_t handle, uint8_t 
     if (it == g_targetOwners.end() || !it->second->m_onRumble)
         return;
     it->second->m_onRumble(leftMotor, rightMotor);
+}
+
+void VirtualController::UpdateMouse(int16_t dx, int16_t dy, uint8_t buttons) {
+    ViiperApi& api = GetViiperApi();
+    if (!m_mouseHandle || !api.mouseLoaded)
+        return;
+    MouseDeviceState state{};
+    state.Buttons = buttons;
+    state.DX = dx;
+    state.DY = dy;
+    api.SetMouseDeviceStateFn(m_mouseHandle, state);
 }
 
 void VirtualController::ViiperDs4OutputCallback(std::uintptr_t handle, uint8_t rumbleSmall, uint8_t rumbleLarge,
