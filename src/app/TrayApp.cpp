@@ -833,6 +833,7 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             if (m_autoSwitchProfiles) {
                 const std::wstring detectedProfileId = GetDetectedGameProfileId();
+                m_activeGameDetected = !detectedProfileId.empty();
                 if (!detectedProfileId.empty()) {
                     m_manualProfileOverride = false;
                     ApplyProfileById(detectedProfileId);
@@ -1010,7 +1011,7 @@ void TrayApp::ReconcileAutoMode() {
 
     if (shouldAutoEnable && !m_controller->IsGameModeActive()) {
         m_controller->EnableGameMode();
-    } else if (m_steamRunning && m_controller->IsGameModeActive()) {
+    } else if (m_steamRunning && !m_activeGameDetected && m_controller->IsGameModeActive()) {
         m_controller->DisableGameMode();
     }
 }

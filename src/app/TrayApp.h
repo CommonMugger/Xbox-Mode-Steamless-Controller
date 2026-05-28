@@ -58,6 +58,7 @@ private:
     bool                               m_autoSwitchProfiles      = false;
     bool                               m_manualProfileOverride   = false;
     bool                               m_steamRunning            = false;
+    bool                               m_activeGameDetected      = false;
     bool                               m_reportSignatureChecked  = false;
     ULONGLONG                          m_lastReconnectAttemptTick = 0;
     std::string                        m_lastWidgetStateJson;
