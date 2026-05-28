@@ -9,6 +9,10 @@ build/
 
 # Claude Code local settings
 .claude/
+memory.md
+plan.md
+release-body-v*.md
+RELEASE_NOTES_v*.md
 
 # Reverse engineering session data
 Results/
@@ -32,3 +36,7 @@ gamebar/SteamControllerRemapperWidget/bin/
 gamebar/SteamControllerRemapperWidget/obj/
 gamebar/SteamControllerRemapperWidget/BundleArtifacts/SteamControllerRemapperWidget-Sideload/
 gamebar/SteamControllerRemapperWidget/BundleArtifacts/SteamControllerRemapperWidget-Sideload.zip
+gamebar/SteamControllerRemapperWidget/BundleArtifacts/SteamControllerRemapper-Installer/
+gamebar/SteamControllerRemapperWidget/BundleArtifacts/SteamControllerRemapper-Installer.zip
+gamebar/SteamControllerRemapperWidget/BundleArtifacts/_manualcopy/
+gamebar/SteamControllerRemapperWidget/BundleArtifacts/_repro/
