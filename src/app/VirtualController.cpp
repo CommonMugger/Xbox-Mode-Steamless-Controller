@@ -416,6 +416,16 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
         g_targetOwners[m_deviceHandle] = this;
     }
 
+    if (api.keyboardLoaded) {
+        if (api.CreateKeyboardDeviceFn(m_serverHandle, &m_keyboardHandle, m_busId, true, 0, 0) != 0)
+            logging::Logf("[VIIPER] Virtual keyboard connected handle=%llu",
+                          static_cast<unsigned long long>(m_keyboardHandle));
+        else {
+            logging::Logf("[VIIPER] Virtual keyboard creation failed");
+            m_keyboardHandle = 0;
+        }
+    }
+
     logging::Logf("[VIIPER] Virtual %s controller connected bus=%u handle=%llu",
                   m_mode == EmulationMode::DualShock4 ? "DualShock 4" : "Xbox 360",
                   m_busId,
@@ -431,6 +441,9 @@ VirtualController::~VirtualController() {
         std::lock_guard<std::mutex> lock(g_notificationMutex);
         g_targetOwners.erase(m_deviceHandle);
     }
+
+    if (api.loaded && api.keyboardLoaded && m_keyboardHandle)
+        api.RemoveKeyboardDeviceFn(m_keyboardHandle);
 
     if (api.loaded && m_deviceHandle) {
         if (m_mode == EmulationMode::DualShock4) {

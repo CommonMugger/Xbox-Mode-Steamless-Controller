@@ -94,21 +94,23 @@ void SendChordUp(const std::vector<uint16_t>& chord) {
         SendKeyEvent(*it, KEYEVENTF_KEYUP);
 }
 
-void RunMacro(std::vector<std::vector<uint16_t>> steps) {
-    std::thread([steps = std::move(steps)]() {
+using KeyChordCb = std::function<void(const std::vector<uint16_t>&, bool)>;
+
+void RunMacro(std::vector<std::vector<uint16_t>> steps, KeyChordCb cb) {
+    std::thread([steps = std::move(steps), cb = std::move(cb)]() {
         for (const auto& chord : steps) {
-            SendChordDown(chord);
+            if (cb) cb(chord, true); else SendChordDown(chord);
             Sleep(20);
-            SendChordUp(chord);
+            if (cb) cb(chord, false); else SendChordUp(chord);
             Sleep(30);
         }
     }).detach();
 }
 
-void TapChord(const std::vector<uint16_t>& chord) {
-    SendChordDown(chord);
+void TapChord(const std::vector<uint16_t>& chord, const KeyChordCb& cb) {
+    if (cb) cb(chord, true); else SendChordDown(chord);
     Sleep(15);
-    SendChordUp(chord);
+    if (cb) cb(chord, false); else SendChordUp(chord);
 }
 }
 
@@ -122,7 +124,8 @@ void PaddleOverlay::Reset() {
         if (m_prevPressed[i] &&
             action.type == PaddleActionType::KeyChord &&
             !action.rapidFire) {
-            SendChordUp(action.chord);
+            if (m_keyChordCallback) m_keyChordCallback(action.chord, false);
+            else SendChordUp(action.chord);
         }
         m_prevPressed[i] = false;
         m_lastFireTickMs[i] = 0;
@@ -160,23 +163,25 @@ void PaddleOverlay::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
             if (action.type == PaddleActionType::KeyChord) {
                 if (action.rapidFire && rapidReady) {
                     logging::Logf("[PaddleOverlay] Fire paddle=%S action=%s rapid=1", PaddleName(i), ActionTypeName(action.type));
-                    TapChord(action.chord);
+                    TapChord(action.chord, m_keyChordCallback);
                     m_lastFireTickMs[i] = now;
                 } else if (rising) {
                     logging::Logf("[PaddleOverlay] Down paddle=%S action=%s rapid=0", PaddleName(i), ActionTypeName(action.type));
-                    SendChordDown(action.chord);
+                    if (m_keyChordCallback) m_keyChordCallback(action.chord, true);
+                    else SendChordDown(action.chord);
                 }
             } else if (action.type == PaddleActionType::Macro) {
                 if (rising || rapidReady) {
                     logging::Logf("[PaddleOverlay] Fire paddle=%S action=%s rapid=%d", PaddleName(i), ActionTypeName(action.type), action.rapidFire ? 1 : 0);
-                    RunMacro(action.macroSteps);
+                    RunMacro(action.macroSteps, m_keyChordCallback);
                     m_lastFireTickMs[i] = now;
                 }
             }
         } else if (!pressed && m_prevPressed[i]) {
             if (action.type == PaddleActionType::KeyChord && !action.rapidFire) {
                 logging::Logf("[PaddleOverlay] Up paddle=%S action=%s", PaddleName(i), ActionTypeName(action.type));
-                SendChordUp(action.chord);
+                if (m_keyChordCallback) m_keyChordCallback(action.chord, false);
+                else SendChordUp(action.chord);
             }
         }
 
