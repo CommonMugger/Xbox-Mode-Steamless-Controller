@@ -57,42 +57,31 @@ function Test-UsbIpDriverPresent {
     return ($driverText -match 'usbip' -or $driverText -match 'vhci')
 }
 
-function Get-LatestUsbIpInstaller {
-    $release = Invoke-RestMethod -Headers @{ 'User-Agent' = 'SteamControllerRemapperInstaller' } `
-        -Uri 'https://api.github.com/repos/vadimgrn/usbip-win2/releases/latest'
-    $asset = $release.assets |
-        Where-Object { $_.name -match '^USBip-.*-x64\.exe$' } |
-        Select-Object -First 1
-    if (-not $asset) {
-        throw 'Could not find an x64 usbip-win2 installer asset in the latest GitHub release.'
-    }
-
-    return [pscustomobject]@{
-        Tag = $release.tag_name
-        Name = $asset.name
-        Url = $asset.browser_download_url
-    }
-}
-
-function Install-UsbIp {
+function Install-UsbIp([string]$UsbIpDir) {
     if (Test-UsbIpDriverPresent) {
         Write-InstallerLog 'USBIP driver already present. Skipping usbip-win2 installation.'
         return
     }
 
-    $asset = Get-LatestUsbIpInstaller
-    $downloadDir = Join-Path $env:TEMP 'SteamControllerRemapper-Installer'
-    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    $installerPath = Join-Path $downloadDir $asset.Name
+    if (-not (Test-Path $UsbIpDir)) {
+        throw "USBIP driver is required but the bundled installer folder '$UsbIpDir' was not found."
+    }
 
-    Write-InstallerLog "Downloading usbip-win2 $($asset.Tag) from $($asset.Url)"
-    Invoke-WebRequest -Headers @{ 'User-Agent' = 'SteamControllerRemapperInstaller' } `
-        -Uri $asset.Url -OutFile $installerPath
+    # The usbip-win2 installer is bundled with the release. We deliberately do
+    # not download it at install time: fetching and running an executable from
+    # the internet at runtime is both unnecessary and a behavior antivirus
+    # heuristics flag.
+    $installer = Get-ChildItem -Path $UsbIpDir -Filter 'USBip-*-x64.exe' -File -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+    if (-not $installer) {
+        throw "No bundled usbip-win2 x64 installer was found in '$UsbIpDir'."
+    }
 
-    $installLogPath = Join-Path $downloadDir 'usbip-win2-install.log'
+    $installLogPath = Join-Path $env:TEMP 'usbip-win2-install.log'
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=`"$installLogPath`"")
-    Write-InstallerLog "Installing usbip-win2 from $installerPath"
-    $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru
+    Write-InstallerLog "Installing bundled usbip-win2 from $($installer.FullName)"
+    $process = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "usbip-win2 installer failed with exit code $($process.ExitCode). See $installLogPath"
     }
@@ -102,7 +91,7 @@ function Install-UsbIp {
         throw 'usbip-win2 installer completed, but the USBIP driver was still not detected. A reboot may be required.'
     }
 
-    Write-InstallerLog "Installed usbip-win2 $($asset.Tag)"
+    Write-InstallerLog "Installed bundled usbip-win2 ($($installer.Name))"
 }
 
 function Install-DesktopApp([string]$DesktopSourcePath) {
@@ -218,7 +207,8 @@ if (-not (Test-Path $desktopViiperDll)) {
 Write-InstallerLog 'Steam Controller Remapper installer'
 Write-InstallerLog "Bundle root: $bundleRoot"
 
-Install-UsbIp
+$usbIpRoot = Join-Path $bundleRoot 'usbip'
+Install-UsbIp -UsbIpDir $usbIpRoot
 
 $installedExePath = Install-DesktopApp -DesktopSourcePath $desktopRoot
 Enable-Startup -InstalledExePath $installedExePath

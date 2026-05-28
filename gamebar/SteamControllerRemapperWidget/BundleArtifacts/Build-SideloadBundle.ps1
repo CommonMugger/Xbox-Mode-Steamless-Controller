@@ -132,6 +132,23 @@ function Assert-DesktopRuntimeLayout([string]$DesktopRoot) {
     }
 }
 
+function Save-UsbIpInstaller([string]$DestinationDir) {
+    New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null
+    Write-Host "Downloading latest usbip-win2 x64 installer to bundle..."
+    $release = Invoke-RestMethod -Headers @{ 'User-Agent' = 'SteamControllerRemapperBuild' } `
+        -Uri 'https://api.github.com/repos/vadimgrn/usbip-win2/releases/latest'
+    $asset = $release.assets |
+        Where-Object { $_.name -match '^USBip-.*-x64\.exe$' } |
+        Select-Object -First 1
+    if (-not $asset) {
+        throw 'Could not find an x64 usbip-win2 installer asset in the latest GitHub release.'
+    }
+    $destination = Join-Path $DestinationDir $asset.name
+    Invoke-WebRequest -Headers @{ 'User-Agent' = 'SteamControllerRemapperBuild' } `
+        -Uri $asset.browser_download_url -OutFile $destination
+    Write-Host "Bundled usbip-win2 $($release.tag_name): $($asset.name)"
+}
+
 $scriptRoot = Split-Path -Parent $PSCommandPath
 if ([string]::IsNullOrWhiteSpace($OutputFolder)) {
     $OutputFolder = Join-Path $scriptRoot 'SteamControllerRemapper-Installer'
@@ -160,6 +177,7 @@ New-Item -ItemType Directory -Path (Join-Path $OutputFolder 'WidgetPackage') | O
 
 Copy-Item -Path (Join-Path $packageFolder.FullName '*') -Destination (Join-Path $OutputFolder 'WidgetPackage') -Recurse
 Copy-DesktopRuntime -SourceRoot $desktopOutput.FullName -DestinationRoot (Join-Path $OutputFolder 'Desktop')
+Save-UsbIpInstaller -DestinationDir (Join-Path $OutputFolder 'usbip')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.cmd') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.cmd')
 Copy-Item -LiteralPath (Join-Path $scriptRoot 'Install-SteamControllerRemapper.ps1') -Destination (Join-Path $OutputFolder 'Install-SteamControllerRemapper.ps1')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination (Join-Path $OutputFolder 'README.md')
