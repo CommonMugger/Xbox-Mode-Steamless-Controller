@@ -98,7 +98,22 @@ function Install-DesktopApp([string]$DesktopSourcePath) {
     $installDir = Join-Path ${env:ProgramFiles} 'Steam Controller Remapper'
     $targetExePath = Join-Path $installDir 'Steam Controller Remapper.exe'
 
-    Get-Process -Name 'Steam Controller Remapper' -ErrorAction SilentlyContinue | Stop-Process -Force
+    # Stop the running app and wait for it to fully exit. Stop-Process returns
+    # before the process releases its loaded modules (libVIIPER.dll), so copying
+    # immediately can fail with a sharing violation. Wait for the processes to
+    # disappear before overwriting the install directory.
+    $running = Get-Process -Name 'Steam Controller Remapper' -ErrorAction SilentlyContinue
+    if ($running) {
+        $running | Stop-Process -Force -ErrorAction SilentlyContinue
+        $running | ForEach-Object { $_.WaitForExit(5000) | Out-Null }
+        for ($i = 0; $i -lt 20; $i++) {
+            if (-not (Get-Process -Name 'Steam Controller Remapper' -ErrorAction SilentlyContinue)) {
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     Copy-Item -Path (Join-Path $DesktopSourcePath '*') -Destination $installDir -Recurse -Force
 

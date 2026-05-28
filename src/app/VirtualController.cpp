@@ -11,10 +11,12 @@
 #endif
 #include <Windows.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace {
@@ -327,10 +329,12 @@ uint8_t BuildDs4Dpad(const XusbReport& xusb) {
 
 DS4DeviceState TranslateDs4(const XusbReport& xusb) {
     DS4DeviceState ds4{};
+    // XInput sticks are +Y = up; DualShock 4 axes are +Y = down. Negate the
+    // vertical axes so up/down are not inverted on the virtual DS4 pad.
     ds4.LX = ScaleThumbToDs4(xusb.leftX);
-    ds4.LY = ScaleThumbToDs4(xusb.leftY);
+    ds4.LY = ScaleThumbToDs4(static_cast<int16_t>(-std::clamp<int>(xusb.leftY, -32767, 32767)));
     ds4.RX = ScaleThumbToDs4(xusb.rightX);
-    ds4.RY = ScaleThumbToDs4(xusb.rightY);
+    ds4.RY = ScaleThumbToDs4(static_cast<int16_t>(-std::clamp<int>(xusb.rightY, -32767, 32767)));
     ds4.DPad = BuildDs4Dpad(xusb);
     ds4.L2 = xusb.leftTrigger;
     ds4.R2 = xusb.rightTrigger;
@@ -372,17 +376,33 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
     config.device_handler_connect_timeout_ms = 5000;
     config.write_batch_flush_interval_ms = 1;
 
-    if (!api.NewUSBServerFn(&config, &m_serverHandle, &ViiperLogCallback)) {
-        logging::Logf("[VIIPER] NewUSBServer failed");
-        m_driverMissing = true;
-        return;
+    // When switching emulation modes, the previous VirtualController's server
+    // is torn down asynchronously (its bus cleanup runs on background
+    // goroutines). Creating a new server/bus immediately can fail because the
+    // listen socket or USB bus has not been released yet. Retry with a short
+    // backoff so a mode switch doesn't surface a spurious failure popup.
+    constexpr int kMaxAttempts = 10;
+    bool serverReady = false;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (!api.NewUSBServerFn(&config, &m_serverHandle, &ViiperLogCallback)) {
+            m_serverHandle = 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            continue;
+        }
+        if (!api.CreateUSBBusFn(m_serverHandle, &m_busId)) {
+            api.CloseUSBServerFn(m_serverHandle);
+            m_serverHandle = 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            continue;
+        }
+        serverReady = true;
+        break;
     }
 
-    if (!api.CreateUSBBusFn(m_serverHandle, &m_busId)) {
-        logging::Logf("[VIIPER] CreateUSBBus failed; USBIP client/driver may be unavailable");
+    if (!serverReady) {
+        logging::Logf("[VIIPER] Server/bus creation failed after %d attempts; USBIP client/driver may be unavailable",
+                      kMaxAttempts);
         m_driverMissing = true;
-        api.CloseUSBServerFn(m_serverHandle);
-        m_serverHandle = 0;
         return;
     }
 
