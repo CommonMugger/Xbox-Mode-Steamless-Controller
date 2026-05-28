@@ -36,8 +36,12 @@ struct ViiperApi {
     decltype(&CreateMouseDevice) CreateMouseDeviceFn = nullptr;
     decltype(&SetMouseDeviceState) SetMouseDeviceStateFn = nullptr;
     decltype(&RemoveMouseDevice) RemoveMouseDeviceFn = nullptr;
+    decltype(&CreateKeyboardDevice) CreateKeyboardDeviceFn = nullptr;
+    decltype(&SetKeyboardDeviceState) SetKeyboardDeviceStateFn = nullptr;
+    decltype(&RemoveKeyboardDevice) RemoveKeyboardDeviceFn = nullptr;
     bool loaded = false;
     bool mouseLoaded = false;
+    bool keyboardLoaded = false;
 };
 
 std::mutex g_notificationMutex;
@@ -119,8 +123,12 @@ ViiperApi& GetViiperApi() {
                 LoadProc(api.module, "CreateMouseDevice",   api.CreateMouseDeviceFn) &&
                 LoadProc(api.module, "SetMouseDeviceState", api.SetMouseDeviceStateFn) &&
                 LoadProc(api.module, "RemoveMouseDevice",   api.RemoveMouseDeviceFn);
-            logging::Logf("[VIIPER] libVIIPER loaded from %s mouseSupport=%d",
-                          logging::Narrow(dllPath).c_str(), api.mouseLoaded ? 1 : 0);
+            api.keyboardLoaded =
+                LoadProc(api.module, "CreateKeyboardDevice",   api.CreateKeyboardDeviceFn) &&
+                LoadProc(api.module, "SetKeyboardDeviceState", api.SetKeyboardDeviceStateFn) &&
+                LoadProc(api.module, "RemoveKeyboardDevice",   api.RemoveKeyboardDeviceFn);
+            logging::Logf("[VIIPER] libVIIPER loaded from %s mouseSupport=%d keyboardSupport=%d",
+                          logging::Narrow(dllPath).c_str(), api.mouseLoaded ? 1 : 0, api.keyboardLoaded ? 1 : 0);
         }
     });
     return api;
@@ -418,6 +426,16 @@ VirtualController::VirtualController(EmulationMode mode, PaddleMappings paddleMa
         }
     }
 
+    if (api.keyboardLoaded) {
+        if (api.CreateKeyboardDeviceFn(m_serverHandle, &m_keyboardHandle, m_busId, true, 0, 0) != 0)
+            logging::Logf("[VIIPER] Virtual keyboard connected handle=%llu",
+                          static_cast<unsigned long long>(m_keyboardHandle));
+        else {
+            logging::Logf("[VIIPER] Virtual keyboard creation failed");
+            m_keyboardHandle = 0;
+        }
+    }
+
     logging::Logf("[VIIPER] Virtual %s controller connected bus=%u handle=%llu",
                   m_mode == EmulationMode::DualShock4 ? "DualShock 4" : "Xbox 360",
                   m_busId,
@@ -433,6 +451,9 @@ VirtualController::~VirtualController() {
         std::lock_guard<std::mutex> lock(g_notificationMutex);
         g_targetOwners.erase(m_deviceHandle);
     }
+
+    if (api.loaded && api.keyboardLoaded && m_keyboardHandle)
+        api.RemoveKeyboardDeviceFn(m_keyboardHandle);
 
     if (api.loaded && api.mouseLoaded && m_mouseHandle)
         api.RemoveMouseDeviceFn(m_mouseHandle);
@@ -491,6 +512,116 @@ void VirtualController::ViiperXboxRumbleCallback(std::uintptr_t handle, uint8_t 
     if (it == g_targetOwners.end() || !it->second->m_onRumble)
         return;
     it->second->m_onRumble(leftMotor, rightMotor);
+}
+
+// Returns the HID modifier bit for modifier VK codes, or 0 if not a modifier.
+static uint8_t VkToModifierBit(uint16_t vk) {
+    switch (vk) {
+    case VK_LCONTROL: case VK_CONTROL: return KB_MOD_LEFT_CTRL;
+    case VK_RCONTROL:                  return KB_MOD_RIGHT_CTRL;
+    case VK_LSHIFT:   case VK_SHIFT:   return KB_MOD_LEFT_SHIFT;
+    case VK_RSHIFT:                    return KB_MOD_RIGHT_SHIFT;
+    case VK_LMENU:    case VK_MENU:    return KB_MOD_LEFT_ALT;
+    case VK_RMENU:                     return KB_MOD_RIGHT_ALT;
+    case VK_LWIN:                      return KB_MOD_LEFT_GUI;
+    case VK_RWIN:                      return KB_MOD_RIGHT_GUI;
+    default:                           return 0;
+    }
+}
+
+// Returns the HID usage code for a non-modifier VK, or 0 if unknown.
+static uint8_t VkToHidUsage(uint16_t vk) {
+    // Letters A-Z
+    if (vk >= 'A' && vk <= 'Z') return static_cast<uint8_t>(0x04 + (vk - 'A'));
+    // Digits 1-9, then 0
+    if (vk >= '1' && vk <= '9') return static_cast<uint8_t>(0x1E + (vk - '1'));
+    if (vk == '0') return 0x27;
+    // Function keys F1-F12
+    if (vk >= VK_F1  && vk <= VK_F12) return static_cast<uint8_t>(0x3A + (vk - VK_F1));
+    if (vk >= VK_F13 && vk <= VK_F24) return static_cast<uint8_t>(0x68 + (vk - VK_F13));
+    switch (vk) {
+    case VK_RETURN:    return 0x28;
+    case VK_ESCAPE:    return 0x29;
+    case VK_BACK:      return 0x2A;
+    case VK_TAB:       return 0x2B;
+    case VK_SPACE:     return 0x2C;
+    case VK_OEM_MINUS: return 0x2D;
+    case VK_OEM_PLUS:  return 0x2E;
+    case VK_OEM_4:     return 0x2F;  // [
+    case VK_OEM_6:     return 0x30;  // ]
+    case VK_OEM_5:     return 0x31;  // backslash
+    case VK_OEM_1:     return 0x33;  // ;
+    case VK_OEM_7:     return 0x34;  // '
+    case VK_OEM_3:     return 0x35;  // `
+    case VK_OEM_COMMA: return 0x36;
+    case VK_OEM_PERIOD:return 0x37;
+    case VK_OEM_2:     return 0x38;  // /
+    case VK_CAPITAL:   return 0x39;
+    case VK_SNAPSHOT:  return 0x46;
+    case VK_SCROLL:    return 0x47;
+    case VK_PAUSE:     return 0x48;
+    case VK_INSERT:    return 0x49;
+    case VK_HOME:      return 0x4A;
+    case VK_PRIOR:     return 0x4B;  // Page Up
+    case VK_DELETE:    return 0x4C;
+    case VK_END:       return 0x4D;
+    case VK_NEXT:      return 0x4E;  // Page Down
+    case VK_RIGHT:     return 0x4F;
+    case VK_LEFT:      return 0x50;
+    case VK_DOWN:      return 0x51;
+    case VK_UP:        return 0x52;
+    case VK_NUMLOCK:   return 0x53;
+    case VK_DIVIDE:    return 0x54;
+    case VK_MULTIPLY:  return 0x55;
+    case VK_SUBTRACT:  return 0x56;
+    case VK_ADD:       return 0x57;
+    case VK_NUMPAD1:   return 0x59;
+    case VK_NUMPAD2:   return 0x5A;
+    case VK_NUMPAD3:   return 0x5B;
+    case VK_NUMPAD4:   return 0x5C;
+    case VK_NUMPAD5:   return 0x5D;
+    case VK_NUMPAD6:   return 0x5E;
+    case VK_NUMPAD7:   return 0x5F;
+    case VK_NUMPAD8:   return 0x60;
+    case VK_NUMPAD9:   return 0x61;
+    case VK_NUMPAD0:   return 0x62;
+    case VK_DECIMAL:   return 0x63;
+    default:           return 0;
+    }
+}
+
+void VirtualController::ApplyKeyVk(uint16_t vk, bool down) {
+    const uint8_t mod = VkToModifierBit(vk);
+    if (mod) {
+        if (down) m_kbModifiers |= mod; else m_kbModifiers &= ~mod;
+        return;
+    }
+    const uint8_t hid = VkToHidUsage(vk);
+    if (!hid) return;
+    if (down) m_kbBitmap[hid / 8] |=  static_cast<uint8_t>(1u << (hid % 8));
+    else      m_kbBitmap[hid / 8] &= ~static_cast<uint8_t>(1u << (hid % 8));
+}
+
+void VirtualController::KeyChordDown(const std::vector<uint16_t>& vkChord) {
+    ViiperApi& api = GetViiperApi();
+    if (!m_keyboardHandle || !api.keyboardLoaded) return;
+    std::lock_guard<std::mutex> lock(m_keyboardMutex);
+    for (uint16_t vk : vkChord) ApplyKeyVk(vk, true);
+    KeyboardDeviceState state{};
+    state.Modifiers = m_kbModifiers;
+    memcpy(state.KeyBitmap, m_kbBitmap.data(), sizeof(state.KeyBitmap));
+    api.SetKeyboardDeviceStateFn(m_keyboardHandle, state);
+}
+
+void VirtualController::KeyChordUp(const std::vector<uint16_t>& vkChord) {
+    ViiperApi& api = GetViiperApi();
+    if (!m_keyboardHandle || !api.keyboardLoaded) return;
+    std::lock_guard<std::mutex> lock(m_keyboardMutex);
+    for (uint16_t vk : vkChord) ApplyKeyVk(vk, false);
+    KeyboardDeviceState state{};
+    state.Modifiers = m_kbModifiers;
+    memcpy(state.KeyBitmap, m_kbBitmap.data(), sizeof(state.KeyBitmap));
+    api.SetKeyboardDeviceStateFn(m_keyboardHandle, state);
 }
 
 void VirtualController::UpdateMouse(int16_t dx, int16_t dy, uint8_t buttons) {

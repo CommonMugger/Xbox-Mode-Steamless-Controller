@@ -145,6 +145,12 @@ void ControllerManager::EnableGameMode() {
     m_trackpad.SetMouseUpdateCallback([this](int16_t dx, int16_t dy, uint8_t buttons) {
         if (m_virtual) m_virtual->UpdateMouse(dx, dy, buttons);
     });
+    m_paddleOverlay.SetKeyChordCallback([this](const std::vector<uint16_t>& chord, bool down) {
+        if (m_virtual) {
+            if (down) m_virtual->KeyChordDown(chord);
+            else      m_virtual->KeyChordUp(chord);
+        }
+    });
     m_trackpad.SetFirmwareMouseEnabled(kEnableFirmwareTrackpadMouse && m_trackpadMouseEnabled);
     m_paddleOverlay.SetBindings(m_paddleActions);
     StartReadLoop();
@@ -249,6 +255,7 @@ void ControllerManager::Close(bool restoreLizard) {
     m_paddleOverlay.Reset();
     m_trackpad.SetHapticCallback({});
     m_trackpad.SetMouseUpdateCallback({});
+    m_paddleOverlay.SetKeyChordCallback({});
     if (g_ctrl) {
         if (restoreLizard && m_gameModeActive)
             g_ctrl->EnableLizardMode();

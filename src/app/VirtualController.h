@@ -1,8 +1,10 @@
 #pragma once
 #include "StandardGamepadState.h"
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 enum class EmulationMode {
@@ -81,6 +83,8 @@ public:
 
     void Update(const uint8_t* buf, size_t n, const StandardGamepadState* standardState = nullptr);
     void UpdateMouse(int16_t dx, int16_t dy, uint8_t buttons);
+    void KeyChordDown(const std::vector<uint16_t>& vkChord);
+    void KeyChordUp(const std::vector<uint16_t>& vkChord);
 
 private:
     static void ViiperXboxRumbleCallback(std::uintptr_t handle, uint8_t leftMotor, uint8_t rightMotor);
@@ -91,7 +95,8 @@ private:
     void* m_module        = nullptr;
     std::uintptr_t m_serverHandle = 0;
     std::uintptr_t m_deviceHandle = 0;
-    std::uintptr_t m_mouseHandle  = 0;
+    std::uintptr_t m_mouseHandle    = 0;
+    std::uintptr_t m_keyboardHandle = 0;
     uint32_t m_busId = 0;
     bool  m_valid        = false;
     bool  m_driverMissing = false;
@@ -101,4 +106,8 @@ private:
     bool m_prevPaddlePressed[5] = {false, false, false, false, false};
     bool m_loggedSdlState = false;
     RumbleCallback m_onRumble;
+    std::mutex                 m_keyboardMutex;
+    uint8_t                    m_kbModifiers = 0;
+    std::array<uint8_t, 32>    m_kbBitmap{};
+    void ApplyKeyVk(uint16_t vk, bool down);
 };
