@@ -7,13 +7,6 @@ build/
 *.lib
 *.pdb
 
-# Claude Code local settings
-.claude/
-memory.md
-plan.md
-release-body-v*.md
-RELEASE_NOTES_v*.md
-
 # Reverse engineering session data
 Results/
 HIDInfo
