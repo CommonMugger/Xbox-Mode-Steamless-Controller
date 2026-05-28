@@ -45,8 +45,8 @@ private:
     MouseUpdateCallback m_mouseCallback;
 
     static constexpr float SENSITIVITY              = 0.015f;
-    static constexpr float HAPTIC_MOVE_THRESHOLD    = 64.0f;  // pixels per haptic pulse
-    static constexpr uint8_t HAPTIC_MOVE_STRENGTH   = 8;
+    static constexpr float HAPTIC_MOVE_THRESHOLD    = 120.0f;  // pixels per haptic pulse
+    static constexpr uint8_t HAPTIC_MOVE_STRENGTH   = 4;
     static constexpr uint8_t HAPTIC_CLICK_STRENGTH  = 64;
     static constexpr std::uint64_t RIGHT_CLICK_HOLD_MS = 300;
 };
