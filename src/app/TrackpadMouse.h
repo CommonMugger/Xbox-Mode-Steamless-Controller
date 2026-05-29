@@ -41,6 +41,7 @@ private:
     uint8_t  m_currentButtons   = 0;
     float    m_hapticMovAccum   = 0.0f;
     std::uint64_t m_clickPressStartTickMs = 0;
+    std::uint64_t m_leftClickReleaseTickMs = 0;
     HapticCallback      m_hapticCallback;
     MouseUpdateCallback m_mouseCallback;
 
@@ -49,4 +50,8 @@ private:
     static constexpr uint8_t HAPTIC_MOVE_STRENGTH   = 4;
     static constexpr uint8_t HAPTIC_CLICK_STRENGTH  = 64;
     static constexpr std::uint64_t RIGHT_CLICK_HOLD_MS = 300;
+    // The virtual mouse reports button state that the host samples periodically,
+    // so a short click must stay held long enough to be observed across at least
+    // one host poll. An instantaneous press+release would never register.
+    static constexpr std::uint64_t LEFT_CLICK_HOLD_MS  = 60;
 };

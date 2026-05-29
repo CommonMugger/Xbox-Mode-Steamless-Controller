@@ -28,6 +28,7 @@ void TrackpadMouse::SendMove(int16_t dx, int16_t dy) {
 
 void TrackpadMouse::Reset() {
     if (m_rightClickActive) SetButton(MOUSE_BTN_RIGHT, false);
+    if (m_leftClickReleaseTickMs != 0) SetButton(MOUSE_BTN_LEFT, false);
     if (m_prevR4) SetButton(MOUSE_BTN_LEFT, false);
     if (m_prevR5) SetButton(MOUSE_BTN_RIGHT, false);
     m_touching = false;
@@ -40,6 +41,7 @@ void TrackpadMouse::Reset() {
     m_currentButtons = 0;
     m_hapticMovAccum = 0.0f;
     m_clickPressStartTickMs = 0;
+    m_leftClickReleaseTickMs = 0;
 }
 
 void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadState* standardState) {
@@ -129,6 +131,14 @@ void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
     }
 
     const std::uint64_t now = GetTickCount64();
+
+    // Release a pending short left-click once it has been held long enough for
+    // the virtual mouse state to be sampled by the host at least once.
+    if (m_leftClickReleaseTickMs != 0 && now >= m_leftClickReleaseTickMs) {
+        SetButton(MOUSE_BTN_LEFT, false);
+        m_leftClickReleaseTickMs = 0;
+    }
+
     if (oppositePadPressed) {
         if (!m_clickPressActive) {
             m_clickPressActive = true;
@@ -146,8 +156,10 @@ void TrackpadMouse::Update(const uint8_t* buf, size_t n, const StandardGamepadSt
         } else {
             if (m_hapticCallback)
                 m_hapticCallback(HAPTIC_CLICK_STRENGTH);
+            // Press now and schedule the release a few ticks later so the
+            // virtual mouse reports the button-down state across a host poll.
             SetButton(MOUSE_BTN_LEFT, true);
-            SetButton(MOUSE_BTN_LEFT, false);
+            m_leftClickReleaseTickMs = now + LEFT_CLICK_HOLD_MS;
         }
         m_clickPressActive = false;
         m_rightClickActive = false;
