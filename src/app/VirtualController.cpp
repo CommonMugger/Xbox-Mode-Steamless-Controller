@@ -311,20 +311,22 @@ int8_t ScaleThumbToDs4(int16_t value) {
 }
 
 uint8_t BuildDs4Dpad(const XusbReport& xusb) {
-    const bool up = (xusb.buttons & XUSB_GAMEPAD_DPAD_UP) != 0;
-    const bool right = (xusb.buttons & XUSB_GAMEPAD_DPAD_RIGHT) != 0;
-    const bool down = (xusb.buttons & XUSB_GAMEPAD_DPAD_DOWN) != 0;
-    const bool left = (xusb.buttons & XUSB_GAMEPAD_DPAD_LEFT) != 0;
+    // NOTE: despite the DS4_DPAD_* hat-enum constants exposed in libVIIPER.h,
+    // VIIPER's DS4 device actually interprets the DPad field as a *direction
+    // bitmask* (it tests `DPad & DPadUp`, `DPad & DPadRight`, ...). The bit
+    // values below come from VIIPER's dualshock4/const.go. Sending the hat-enum
+    // value instead made neutral (0x08) read as Right and scrambled directions.
+    constexpr uint8_t DPAD_BIT_UP    = 0x01;
+    constexpr uint8_t DPAD_BIT_DOWN  = 0x02;
+    constexpr uint8_t DPAD_BIT_LEFT  = 0x04;
+    constexpr uint8_t DPAD_BIT_RIGHT = 0x08;
 
-    if (up && right) return DS4_DPAD_UP_RIGHT;
-    if (right && down) return DS4_DPAD_DOWN_RIGHT;
-    if (down && left) return DS4_DPAD_DOWN_LEFT;
-    if (left && up) return DS4_DPAD_UP_LEFT;
-    if (up) return DS4_DPAD_UP;
-    if (right) return DS4_DPAD_RIGHT;
-    if (down) return DS4_DPAD_DOWN;
-    if (left) return DS4_DPAD_LEFT;
-    return DS4_DPAD_NEUTRAL;
+    uint8_t bits = 0;
+    if (xusb.buttons & XUSB_GAMEPAD_DPAD_UP)    bits |= DPAD_BIT_UP;
+    if (xusb.buttons & XUSB_GAMEPAD_DPAD_DOWN)  bits |= DPAD_BIT_DOWN;
+    if (xusb.buttons & XUSB_GAMEPAD_DPAD_LEFT)  bits |= DPAD_BIT_LEFT;
+    if (xusb.buttons & XUSB_GAMEPAD_DPAD_RIGHT) bits |= DPAD_BIT_RIGHT;
+    return bits;  // 0 = neutral (VIIPER maps no bits set to the released hat)
 }
 
 DS4DeviceState TranslateDs4(const XusbReport& xusb) {
